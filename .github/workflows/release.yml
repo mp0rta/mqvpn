@@ -36,8 +36,8 @@ jobs:
     strategy:
       matrix:
         include:
-          # amd64 deb is intentionally built on 22.04, not ubuntu-latest.
-          # ubuntu-latest (24.04) links against libevent-2.1-7t64 (the t64
+          # amd64 deb is intentionally built on 22.04, not 24.04.
+          # 24.04 links against libevent-2.1-7t64 (the t64
           # transition rename), so dpkg-shlibdeps pins Depends: to a package
           # name that does not exist on Ubuntu 22.04 / Debian 12. Building on
           # 22.04 yields Depends: libevent-2.1-7, which is satisfied natively
@@ -46,10 +46,10 @@ jobs:
           # those. arm64 stays on 24.04 because GitHub has no 22.04 ARM runner.
           - { os: linux,   arch: amd64, runner: ubuntu-22.04     }
           - { os: linux,   arch: arm64, runner: ubuntu-24.04-arm }
-          # macos-14 (arm64) matches ci.yml's darwin job — the only Darwin
+          # macos-15 (arm64) matches ci.yml's darwin job — the only Darwin
           # config that is continuously tested. Intel (x86_64) is deliberately
           # not built: no CI coverage, and Apple silicon covers current Macs.
-          - { os: darwin,  arch: arm64, runner: macos-14         }
+          - { os: darwin,  arch: arm64, runner: macos-15         }
           # amd64 pinned to windows-2022 (VS 2022): windows-latest migrated to
           # VS 2026 in June 2026. windows-11-arm has no VS 2022 label and moved
           # to VS 2026 by October 2026, so arm64 builds with that generator.
@@ -88,7 +88,8 @@ jobs:
         if: matrix.os == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake libevent-dev golang iptables
+          # The build dependencies are in packaging/build-deps.control.
+          sudo apt-get -y satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)" iptables
 
       - name: Build BoringSSL
         if: matrix.os == 'linux'
@@ -111,11 +112,8 @@ jobs:
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-dangling-pointer" ..
           make -j$(nproc)
 
@@ -174,6 +172,7 @@ jobs:
           cp build/libmqvpn.so* "$STAGING/lib/" 2>/dev/null || true
           cp third_party/xquic/build/libxquic.so "$STAGING/lib/"
           cp scripts/mqvpn-server-nat.sh "$STAGING/lib/mqvpn/"
+          cp build/mqvpn-nat-config "$STAGING/lib/mqvpn/"
           cp build-tarball/systemd/mqvpn-server.service "$STAGING/systemd/"
           cp build-tarball/systemd/mqvpn-client@.service "$STAGING/systemd/"
           cp systemd/server.conf.example "$STAGING/etc/mqvpn/"
@@ -202,9 +201,29 @@ jobs:
             exit 1
           fi
 
+      # install.sh installs the server from the tarball, not from the debs:
+      # the deb split must not take the server files out of the tarball.
+      - name: Verify server files in tarball
+        if: matrix.os == 'linux'
+        run: |
+          set -e
+          tarball=$(ls mqvpn_*.tar.gz)
+          for f in lib/mqvpn/mqvpn-server-nat.sh lib/mqvpn/mqvpn-nat-config \
+                   systemd/mqvpn-server.service etc/mqvpn/server.conf.example; do
+            if ! tar tzf "$tarball" | grep -qxF "./$f"; then
+              echo "::error::tarball is missing $f (install.sh needs it)"
+              exit 1
+            fi
+          done
+
+      # Placement, Depends/Breaks/Replaces and conffiles of all three debs.
+      - name: Check deb contents
+        if: matrix.os == 'linux'
+        run: scripts/ci_e2e/check_deb_contents.sh build
+
       - name: Stage release artifacts
         if: matrix.os == 'linux'
-        run: cp build/mqvpn_*.deb .
+        run: cp build/mqvpn_*.deb build/mqvpn-server_*.deb build/mqvpn-dev_*.deb .
 
       - name: Install libevent (macOS)
         if: matrix.os == 'darwin'
@@ -232,11 +251,8 @@ jobs:
           # gcc-only -Wno-dangling-pointer for every non-MSVC compiler;
           # AppleClang would otherwise error on the unknown warning flag
           # (same workaround as ci.yml's darwin job).
-          cmake -DCMAKE_BUILD_TYPE=Release -DSSL_TYPE=boringssl \
-                -DXQC_ENABLE_BBR2=ON \
-                -DXQC_ENABLE_UNLIMITED=ON \
-                -DXQC_ENABLE_FEC=ON \
-                -DXQC_ENABLE_XOR=ON \
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
                 -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j"$(sysctl -n hw.ncpu)"
 
@@ -341,7 +357,7 @@ jobs:
 
       - name: Setup Go (Windows, BoringSSL build)
         if: matrix.os == 'windows'
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version: 'stable'
 
@@ -429,12 +445,8 @@ jobs:
           cmake -G "${{ matrix.vs }}" -A ${{ matrix.arch == 'amd64' && 'x64' || 'ARM64' }} `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_C_STANDARD=11 `
-            -DSSL_TYPE=boringssl `
-            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" `
-            -DXQC_ENABLE_BBR2=ON `
-            -DXQC_ENABLE_UNLIMITED=ON `
-            -DXQC_ENABLE_FEC=ON `
-            -DXQC_ENABLE_XOR=ON ..
+            $(Get-Content "${{ github.workspace }}/scripts/xquic-cmake-flags") `
+            -DSSL_PATH="${{ github.workspace }}/third_party/xquic/third_party/boringssl" ..
           cmake --build . --config Release
 
       - name: Build mqvpn (Windows)
@@ -585,10 +597,12 @@ jobs:
           name: release-${{ matrix.arch }}
           path: |
             mqvpn_*.deb
+            mqvpn-server_*.deb
+            mqvpn-dev_*.deb
             mqvpn_*_${{ matrix.arch }}.tar.gz
 
   build-android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     # The upload-key secrets live in the protected `release` environment whose
     # deployment rule admits only v* tags, so GitHub — not a check inside this
@@ -644,13 +658,13 @@ jobs:
           done
 
       - name: Set up JDK 21
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: 21
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
 
       # The stable upload key signs only official tag builds of the canonical
       # repo. An APK carrying that signature is update-compatible and trusted
@@ -832,7 +846,7 @@ jobs:
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-release, build-android, android-repro]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: write
@@ -893,7 +907,8 @@ jobs:
           # nullglob so missing pattern → empty rather than the literal pattern
           # passed to sha256sum (would fail "No such file or directory").
           shopt -s nullglob
-          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn_*.zip mqvpn_*_android.apk > SHA256SUMS
+          sha256sum mqvpn_*.tar.gz mqvpn_*.deb mqvpn-server_*.deb mqvpn-dev_*.deb \
+            mqvpn_*.zip mqvpn_*_android.apk > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest build provenance
@@ -905,6 +920,8 @@ jobs:
           subject-path: |
             artifacts/mqvpn_*.tar.gz
             artifacts/mqvpn_*.deb
+            artifacts/mqvpn-server_*.deb
+            artifacts/mqvpn-dev_*.deb
             artifacts/mqvpn_*.zip
             artifacts/mqvpn_*_android.apk
 
@@ -915,7 +932,7 @@ jobs:
           shopt -s nullglob
           VERSION="${GITHUB_REF_NAME#v}"
           TARS=(artifacts/mqvpn_*.tar.gz)
-          DEBS=(artifacts/mqvpn_*.deb)
+          DEBS=(artifacts/mqvpn_*.deb artifacts/mqvpn-server_*.deb artifacts/mqvpn-dev_*.deb)
           ZIPS=(artifacts/mqvpn_*.zip)
           APKS=(artifacts/mqvpn_*_android.apk)
           # SemVer pre-release identifier (anything after '-') → mark as

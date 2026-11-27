@@ -28,6 +28,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/sockios.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdint.h>
@@ -77,6 +78,11 @@ static int g_tests_passed = 0;
         }                                                                            \
     } while (0)
 
+/* xquic's process-wide clock, which the mqvpn server engine sets: the probe
+ * engine's timers run on it, so its receive times must too (exported by the
+ * static lib, not part of the public xquic.h). */
+extern xqc_timestamp_pt xqc_monotonic_timestamp;
+
 static uint64_t
 test_now_us(void)
 {
@@ -107,7 +113,12 @@ noop_tunnel_config_ready(const mqvpn_tunnel_info_t *info, void *user_ctx)
 
 /* ── Minimal raw H3 probe client ── */
 
+/* First member of probe_conn_t and probe_req_t: the engine-wide request
+ * callbacks tell the two user_data types apart by it. */
+enum { PROBE_KIND_CONN = 0, PROBE_KIND_REQ = 1 };
+
 typedef struct {
+    int kind; /* PROBE_KIND_CONN (0, so a memset probe qualifies) */
     xqc_engine_t *engine;
     int fd;
     xqc_cid_t cid;
@@ -158,15 +169,34 @@ typedef struct {
     size_t raw_recv_cap;
     int raw_recv_fin;
 
-    /* Parked-flow idle-eviction test: when set, probe_cb_request_read's body
-     * branch does NOT call xqc_h3_request_recv_body at all on a
-     * XQC_REQ_NOTIFY_READ_BODY notify — no consumption means xquic never
-     * grows this stream's receive window back, which is exactly the
-     * condition (client stops reading, never reopens flow control) that
-     * parks a server-side connect-tcp flow in uplink_withheld. Independent
-     * of raw_capture (checked first) so the two knobs don't fight. */
-    int suppress_body_drain;
+    /* recv_rate_bytes_per_sec of every request the probe opens (0: default
+     * stream settings); harness_start_opts sets it. */
+    uint64_t stream_recv_rate;
 } probe_conn_t;
+
+/* One connect-tcp request with its own state (probe_open_tcp_request). */
+typedef struct {
+    int kind; /* PROBE_KIND_REQ */
+    xqc_h3_request_t *req;
+    size_t body_rcvd;
+    int reading; /* the read callback drains the body only while set */
+    int fin;
+    int closed;
+    char status[8];
+    /* Test-local: when set, the read callback checks the body against bp_pat
+     * keyed on body_rcvd and latches a mismatch in bad_pattern. */
+    int check_pattern;
+    int bad_pattern;
+} probe_req_t;
+
+static xqc_stream_settings_t *
+probe_stream_settings(const probe_conn_t *p, xqc_stream_settings_t *buf)
+{
+    if (!p->stream_recv_rate) return NULL;
+    memset(buf, 0, sizeof(*buf));
+    buf->recv_rate_bytes_per_sec = p->stream_recv_rate;
+    return buf;
+}
 
 static void
 probe_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_data)
@@ -179,14 +209,17 @@ probe_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_da
      * noise. */
 }
 
+typedef struct harness harness_t;
+static void harness_note_probe_wake(harness_t *h, uint64_t wake_after);
+
 static void
 probe_set_event_timer(xqc_usec_t wake_after, void *user_data)
 {
-    (void)wake_after;
-    (void)user_data;
-    /* No-op: the driving loop below polls unconditionally rather than
-     * waiting for xquic's requested wake time (mirrors test_server.c's
-     * bounded poll-loop idiom). */
+    /* Engine user_data is the harness (NULL for a bare engine). */
+    if (user_data) harness_note_probe_wake((harness_t *)user_data, wake_after);
+    /* The driving loop below polls unconditionally rather than waiting for
+     * xquic's requested wake time (mirrors test_server.c's bounded
+     * poll-loop idiom). */
 }
 
 static ssize_t
@@ -242,7 +275,9 @@ probe_save_tp(const char *d, size_t dl, void *u)
 static int
 probe_open_request(probe_conn_t *p)
 {
-    xqc_h3_request_t *req = xqc_h3_request_create(p->engine, &p->cid, NULL, p);
+    xqc_stream_settings_t ss;
+    xqc_h3_request_t *req =
+        xqc_h3_request_create(p->engine, &p->cid, probe_stream_settings(p, &ss), p);
     if (!req) return -1;
 
     const char *path = p->path ? p->path : "/probe";
@@ -284,7 +319,9 @@ probe_open_request(probe_conn_t *p)
 static int
 probe_open_request_with_body(probe_conn_t *p)
 {
-    xqc_h3_request_t *req = xqc_h3_request_create(p->engine, &p->cid, NULL, p);
+    xqc_stream_settings_t ss;
+    xqc_h3_request_t *req =
+        xqc_h3_request_create(p->engine, &p->cid, probe_stream_settings(p, &ss), p);
     if (!req) return -1;
 
     const char *path = p->path ? p->path : "/probe";
@@ -318,6 +355,7 @@ probe_open_request_with_body(probe_conn_t *p)
 static int
 probe_open_connect_ip(probe_conn_t *p)
 {
+    /* NULL settings, as mqvpn_client passes for the tunnel request. */
     xqc_h3_request_t *req = xqc_h3_request_create(p->engine, &p->cid, NULL, p);
     if (!req) return -1;
 
@@ -404,10 +442,63 @@ probe_cb_h3_conn_close(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *user_
     return 0;
 }
 
+/* Deterministic byte pattern for the backpressure tests. */
+static uint8_t
+bp_pat(uint64_t k)
+{
+    return (uint8_t)(k ^ (k >> 8) ^ (k >> 16));
+}
+
+static int
+bp_queue_bytes(int fd, unsigned long req)
+{
+    int v = 0;
+    return ioctl(fd, req, &v) == 0 ? v : 0;
+}
+
+static void
+probe_parse_status(xqc_h3_request_t *h3_request, char *status, size_t cap)
+{
+    unsigned char fin = 0;
+    xqc_http_headers_t *headers = xqc_h3_request_recv_headers(h3_request, &fin);
+    if (!headers) return;
+    for (int i = 0; i < (int)headers->count; i++) {
+        xqc_http_header_t *h = &headers->headers[i];
+        if (h->name.iov_len == 7 && memcmp(h->name.iov_base, ":status", 7) == 0) {
+            size_t n = h->value.iov_len < cap - 1 ? h->value.iov_len : cap - 1;
+            memcpy(status, h->value.iov_base, n);
+            status[n] = '\0';
+        }
+    }
+}
+
+static int
+probe_req_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
+               probe_req_t *r)
+{
+    if (flag & XQC_REQ_NOTIFY_READ_HEADER)
+        probe_parse_status(h3_request, r->status, sizeof(r->status));
+    if ((flag & XQC_REQ_NOTIFY_READ_BODY) && r->reading) {
+        unsigned char buf[4096];
+        unsigned char fin = 0;
+        ssize_t n;
+        while ((n = xqc_h3_request_recv_body(h3_request, buf, sizeof(buf), &fin)) > 0) {
+            if (r->check_pattern)
+                for (ssize_t i = 0; i < n; i++)
+                    if (buf[i] != bp_pat(r->body_rcvd + (uint64_t)i)) r->bad_pattern = 1;
+            r->body_rcvd += (size_t)n;
+        }
+        if (fin) r->fin = 1;
+    }
+    return 0;
+}
+
 static int
 probe_cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t flag,
                       void *user_data)
 {
+    if (*(int *)user_data == PROBE_KIND_REQ)
+        return probe_req_read(h3_request, flag, (probe_req_t *)user_data);
     probe_conn_t *p = (probe_conn_t *)user_data;
 
     if (flag & XQC_REQ_NOTIFY_READ_HEADER) {
@@ -429,11 +520,6 @@ probe_cb_request_read(xqc_h3_request_t *h3_request, xqc_request_notify_flag_t fl
     }
 
     if (flag & XQC_REQ_NOTIFY_READ_BODY) {
-        if (p->suppress_body_drain) {
-            /* Deliberately do not call recv_body — see the field comment on
-             * probe_conn_t.suppress_body_drain. */
-            return 0;
-        }
         if (p->raw_capture) {
             /* Relay tests: capture the echoed bytes verbatim,
              * growing the buffer as needed — no capsule framing on a
@@ -517,6 +603,12 @@ static int
 probe_cb_request_close(xqc_h3_request_t *h3_request, void *user_data)
 {
     (void)h3_request;
+    if (user_data && *(int *)user_data == PROBE_KIND_REQ) {
+        probe_req_t *r = (probe_req_t *)user_data;
+        r->closed = 1;
+        r->req = NULL;
+        return 0;
+    }
     probe_conn_t *p = (probe_conn_t *)user_data;
     if (p) p->request_closed = 1;
     return 0;
@@ -532,7 +624,7 @@ probe_cb_request_closing_notify(xqc_h3_request_t *h3_request, xqc_int_t err,
 }
 
 static xqc_engine_t *
-probe_create_engine(void)
+probe_create_engine(void *engine_user_data)
 {
     xqc_engine_ssl_config_t engine_ssl;
     memset(&engine_ssl, 0, sizeof(engine_ssl));
@@ -561,7 +653,7 @@ probe_create_engine(void)
     xconfig.cfg_log_level = XQC_LOG_ERROR;
 
     xqc_engine_t *engine = xqc_engine_create(XQC_ENGINE_CLIENT, &xconfig, &engine_ssl,
-                                             &engine_cbs, &tcbs, NULL);
+                                             &engine_cbs, &tcbs, engine_user_data);
     if (!engine) return NULL;
 
     xqc_h3_callbacks_t h3_cbs = {
@@ -616,7 +708,16 @@ typedef struct {
     int active;
 } harness_egress_fd_t;
 
-typedef struct {
+typedef struct harness_delayed {
+    struct harness_delayed *next;
+    uint64_t due_us;
+    size_t len;
+    struct sockaddr_storage from;
+    socklen_t from_len;
+    uint8_t data[];
+} harness_delayed_t;
+
+struct harness {
     int svr_fd, cli_fd;
     /* POSIX bind over svr_fd. Borrowed: mqvpn_server_destroy finalises it,
      * harness_stop closes the fd afterwards. */
@@ -625,13 +726,26 @@ typedef struct {
     mqvpn_server_t *svr;
     probe_conn_t probe;
     harness_egress_fd_t egress_fds[HARNESS_MAX_EGRESS_FDS];
-    int egress_dispatches; /* mqvpn_server_on_egress_fd_ready calls made by
-                            * harness_pump — a test resets and reads it. */
-    int freeze_probe;      /* 1: harness_pump neither feeds nor runs the
-                            * probe engine, so nothing the server sends is
-                            * ever answered (keeps an H3 stream from ever
-                            * finishing its close). */
-} harness_t;
+    int egress_dispatches;    /* mqvpn_server_on_egress_fd_ready calls made by
+                               * harness_pump — a test resets and reads it. */
+    int freeze_probe;         /* 1: harness_pump neither feeds nor runs the
+                               * probe engine, so nothing the server sends is
+                               * ever answered (keeps an H3 stream from ever
+                               * finishing its close). */
+    uint64_t probe_recv_rate; /* the probe's recv_rate_bytes_per_sec */
+    uint32_t s2c_delay_us;    /* harness_pump delays server->probe datagrams by
+                               * this much; may change mid-test. */
+    harness_delayed_t *dq_head, *dq_tail;
+    uint64_t probe_wake_count;   /* set_event_timer calls of the probe engine */
+    uint64_t probe_last_wake_us; /* wake_after of the latest one */
+};
+
+static void
+harness_note_probe_wake(harness_t *h, uint64_t wake_after)
+{
+    h->probe_wake_count++;
+    h->probe_last_wake_us = wake_after;
+}
 
 /* mqvpn_server_callbacks_t.egress_fd_register implementation: records/
  * updates one slot in h->egress_fds, keyed by fd. Passed mqvpn_server_new's
@@ -695,11 +809,22 @@ harness_egress_fd_unregister(int fd, void *user_ctx)
  * (nullable) runs on the server config after the fixed harness defaults and
  * before mqvpn_server_new — the seam tests use to exercise config-dependent
  * server behavior (e.g. the egress ACL) through the PUBLIC setter API. */
+typedef struct {
+    uint64_t recv_rate_bytes_per_sec; /* probe conn-level receive rate, 0: none */
+    uint32_t s2c_delay_us;            /* initial server->probe delay */
+} harness_probe_opts_t;
+
 static int
-harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_open,
-              void (*cfg_hook)(mqvpn_config_t *))
+harness_start_opts(harness_t *h, const char *protocol, size_t protocol_len, int auto_open,
+                   void (*cfg_hook)(mqvpn_config_t *), const harness_probe_opts_t *opts)
 {
     memset(h, 0, sizeof(*h));
+    if (opts) {
+        h->probe_recv_rate = opts->recv_rate_bytes_per_sec;
+        h->s2c_delay_us = opts->s2c_delay_us;
+        h->probe.stream_recv_rate =
+            mqvpn_tcp_stream_recv_rate(opts->recv_rate_bytes_per_sec);
+    }
     h->svr_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     if (h->svr_fd < 0) return -1;
     h->cli_fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
@@ -779,7 +904,7 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
     snprintf(h->probe.authority, sizeof(h->probe.authority), "127.0.0.1:%d",
              ntohs(h->svr_addr.sin_port));
 
-    h->probe.engine = probe_create_engine();
+    h->probe.engine = probe_create_engine(h);
     if (!h->probe.engine) goto fail_server;
 
     {
@@ -790,6 +915,7 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
             .scheduler = MQVPN_SCHED_MINRTT,
             .cc = MQVPN_CC_BBR2,
             .init_max_path_id = 0,
+            .recv_rate_bytes_per_sec = h->probe_recv_rate,
         };
         mqvpn_build_conn_settings(&cs_in, &cs);
 
@@ -820,6 +946,62 @@ fail_sockets:
     return -1;
 }
 
+static int
+harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_open,
+              void (*cfg_hook)(mqvpn_config_t *))
+{
+    return harness_start_opts(h, protocol, protocol_len, auto_open, cfg_hook, NULL);
+}
+
+/* Reads the probe socket and hands datagrams to the probe engine, each one
+ * s2c_delay_us after it arrived (immediately while no delay is set and
+ * nothing is queued; a lowered delay never reorders queued datagrams). */
+static void
+harness_deliver_s2c(harness_t *h, uint8_t *buf, size_t cap)
+{
+    for (;;) {
+        struct sockaddr_storage from;
+        socklen_t from_len = sizeof(from);
+        ssize_t n = recvfrom(h->cli_fd, buf, cap, MSG_DONTWAIT, (struct sockaddr *)&from,
+                             &from_len);
+        if (n <= 0) break;
+        if (!h->s2c_delay_us && !h->dq_head) {
+            xqc_engine_packet_process(h->probe.engine, buf, (size_t)n,
+                                      (struct sockaddr *)&h->cli_addr,
+                                      sizeof(h->cli_addr), (struct sockaddr *)&from,
+                                      from_len, xqc_monotonic_timestamp(), NULL);
+            continue;
+        }
+        harness_delayed_t *d = malloc(sizeof(*d) + (size_t)n);
+        if (!d) {
+            printf("FAIL\n    harness_deliver_s2c: out of memory\n");
+            exit(1);
+        }
+        d->next = NULL;
+        d->due_us = test_now_us() + h->s2c_delay_us;
+        d->len = (size_t)n;
+        d->from = from;
+        d->from_len = from_len;
+        memcpy(d->data, buf, (size_t)n);
+        if (h->dq_tail)
+            h->dq_tail->next = d;
+        else
+            h->dq_head = d;
+        h->dq_tail = d;
+    }
+    uint64_t now = test_now_us();
+    while (h->dq_head && h->dq_head->due_us <= now) {
+        harness_delayed_t *d = h->dq_head;
+        h->dq_head = d->next;
+        if (!h->dq_head) h->dq_tail = NULL;
+        xqc_engine_packet_process(h->probe.engine, d->data, d->len,
+                                  (struct sockaddr *)&h->cli_addr, sizeof(h->cli_addr),
+                                  (struct sockaddr *)&d->from, d->from_len,
+                                  xqc_monotonic_timestamp(), NULL);
+        free(d);
+    }
+}
+
 /* Drives both engines (drain sockets, tick, poll) until *done becomes
  * nonzero or ~budget_ms of wall time elapses. */
 static void
@@ -827,20 +1009,8 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
 {
     uint8_t buf[65536];
     for (int elapsed = 0; elapsed < budget_ms && !*done;) {
-        struct sockaddr_storage from;
-        socklen_t from_len;
-
         mqvpn_bind_posix_server_drain(h->svr_tctx, h->svr, 64);
-        for (; !h->freeze_probe;) {
-            from_len = sizeof(from);
-            ssize_t n = recvfrom(h->cli_fd, buf, sizeof(buf), MSG_DONTWAIT,
-                                 (struct sockaddr *)&from, &from_len);
-            if (n <= 0) break;
-            xqc_engine_packet_process(h->probe.engine, buf, (size_t)n,
-                                      (struct sockaddr *)&h->cli_addr,
-                                      sizeof(h->cli_addr), (struct sockaddr *)&from,
-                                      from_len, (xqc_usec_t)test_now_us(), NULL);
-        }
+        if (!h->freeze_probe) harness_deliver_s2c(h, buf, sizeof(buf));
 
         /* Egress fd events (connect-tcp connect()/relay I/O the server
          * registered via egress_fd_register). Zero-timeout poll: this is
@@ -879,6 +1049,11 @@ harness_pump(harness_t *h, const int *done, int budget_ms)
         int wait_ms = 20;
         if (svr_int.next_timer_ms > 0 && svr_int.next_timer_ms < wait_ms)
             wait_ms = svr_int.next_timer_ms;
+        if (h->dq_head) {
+            int64_t due_ms =
+                ((int64_t)h->dq_head->due_us - (int64_t)test_now_us()) / 1000;
+            if (due_ms < wait_ms) wait_ms = (int)due_ms;
+        }
         if (wait_ms < 1) wait_ms = 1;
 
         struct pollfd pfds[2] = {
@@ -938,6 +1113,47 @@ probe_send_fin_retry(harness_t *h, probe_conn_t *p, int iter_budget)
     return -1;
 }
 
+/* Opens a connect-tcp request to 127.0.0.1:dst_port with its own state `r`
+ * (zeroed here, reading on). The stream settings are those of every probe
+ * request (probe_stream_settings). */
+static int
+probe_open_tcp_request(harness_t *h, probe_req_t *r, uint16_t dst_port)
+{
+    probe_conn_t *p = &h->probe;
+    memset(r, 0, sizeof(*r));
+    r->kind = PROBE_KIND_REQ;
+    r->reading = 1;
+
+    xqc_stream_settings_t ss;
+    xqc_h3_request_t *req =
+        xqc_h3_request_create(p->engine, &p->cid, probe_stream_settings(p, &ss), r);
+    if (!req) return -1;
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%u/", dst_port);
+    xqc_http_header_t hdrs[5] = {
+        {.name = {.iov_base = ":method", .iov_len = 7},
+         .value = {.iov_base = "CONNECT", .iov_len = 7},
+         .flags = 0},
+        {.name = {.iov_base = ":protocol", .iov_len = 9},
+         .value = {.iov_base = "mqvpn-tcp", .iov_len = 9},
+         .flags = 0},
+        {.name = {.iov_base = ":scheme", .iov_len = 7},
+         .value = {.iov_base = "https", .iov_len = 5},
+         .flags = 0},
+        {.name = {.iov_base = ":authority", .iov_len = 10},
+         .value = {.iov_base = p->authority, .iov_len = strlen(p->authority)},
+         .flags = 0},
+        {.name = {.iov_base = ":path", .iov_len = 5},
+         .value = {.iov_base = path, .iov_len = strlen(path)},
+         .flags = 0},
+    };
+    xqc_http_headers_t headers = {.headers = hdrs, .count = 5, .capacity = 5};
+    if (xqc_h3_request_send_headers(req, &headers, 0) < 0) return -1;
+    r->req = req;
+    return 0;
+}
+
 static void
 harness_stop(harness_t *h)
 {
@@ -946,6 +1162,12 @@ harness_stop(harness_t *h)
     xqc_engine_destroy(h->probe.engine);
     mqvpn_server_destroy(h->svr);
     h->svr_tctx = NULL;
+    while (h->dq_head) {
+        harness_delayed_t *d = h->dq_head;
+        h->dq_head = d->next;
+        free(d);
+    }
+    h->dq_tail = NULL;
     close(h->svr_fd);
     close(h->cli_fd);
 }
@@ -1056,6 +1278,35 @@ tcp_sink_close(tcp_sink_t *s)
 {
     if (s->conn_fd >= 0) close(s->conn_fd);
     close(s->listen_fd);
+}
+
+/* Bytes of `sink_sent` (what the sink wrote toward the egress socket) that sit
+ * neither in the sink's send queue nor in the egress socket's receive queue,
+ * minus the relay's own one-chunk stash (TCP_EGRESS_RELAY_CHUNK in
+ * tcp_egress.c): what is parked in QUIC for that flow. The egress socket is
+ * the one connected to the sink's port. */
+static size_t
+harness_held_bytes(harness_t *h, tcp_sink_t *sink, size_t sink_sent)
+{
+    int egress_fd = -1;
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS && egress_fd < 0; i++) {
+        if (!h->egress_fds[i].active) continue;
+        struct sockaddr_in a;
+        socklen_t al = sizeof(a);
+        if (getpeername(h->egress_fds[i].fd, (struct sockaddr *)&a, &al) == 0 &&
+            ntohs(a.sin_port) == sink->port)
+            egress_fd = h->egress_fds[i].fd;
+    }
+    if (egress_fd < 0) {
+        printf("FAIL\n    %s:%d: no egress fd for the sink's port %d\n", __FILE__,
+               __LINE__, sink->port);
+        exit(1);
+    }
+    long long sendq = bp_queue_bytes(sink->conn_fd, SIOCOUTQ);
+    long long recvq = bp_queue_bytes(egress_fd, SIOCINQ);
+    /* Assumes one relay stash is in use, so the result is a lower bound. */
+    long long held = (long long)sink_sent - sendq - recvq - 16384;
+    return held > 0 ? (size_t)held : 0;
 }
 
 /* harness_pump, plus a tcp_sink_pump tick before each slice — the shape
@@ -2041,22 +2292,45 @@ TEST(mqvpn_tcp_bodiless_fin_becomes_shut_wr)
     free(h.probe.raw_recv_buf);
 }
 
+/* The egress socket the server opened for the (single) flow, or NULL. */
+static const harness_egress_fd_t *
+bp_egress_slot(const harness_t *h)
+{
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++)
+        if (h->egress_fds[i].active) return &h->egress_fds[i];
+    return NULL;
+}
+
+/* One slice of the loop every wait below runs: sink accept tick, then pump. */
+static void
+bp_pump(harness_t *h, tcp_sink_t *sink, int ms)
+{
+    tcp_sink_pump(sink);
+    int never = 0;
+    harness_pump(h, &never, ms);
+}
+
 /* Test 4: downlink backpressure pause/resume + deferred-shutdown ordering.
- * The sink accepts but NEVER reads; the probe pumps a large payload
- * (deliberately larger than the default loopback socket buffers) so
- * send()'s EWOULDBLOCK in svr_tcp_egress_drain_body is hit for real,
- * pausing the flow — which, through ordinary QUIC stream flow control
- * (the server stops draining recv_body while paused), backpressures the
- * probe's own sends too. The probe fins its side WHILE still paused/
- * backed up (before the sink ever drains), exercising the "fin arrives
- * during pause must not shutdown ahead of the still-stashed bytes"
- * ordering. The sink then starts draining and must receive every byte,
+ * The sink accepts but NEVER reads and has a 16 KiB receive buffer; the
+ * server's egress socket gets a 16 KiB send buffer. The probe sends 2 MiB,
+ * far more than the two socket buffers hold, so send()'s EWOULDBLOCK in
+ * svr_tcp_egress_drain_body is hit for real and the flow pauses
+ * (want_write armed; asserted before the FIN). The 2 MiB fits in the
+ * stream window, so the probe can send it all and the FIN while the flow
+ * is still paused (before the sink ever drains), exercising the "fin
+ * arrives during pause must not shutdown ahead of the still-stashed
+ * bytes" ordering. The sink then starts draining and must receive every byte,
  * in order, with nothing lost — which is only possible if the deferred
  * shutdown really waited for the stash to fully flush first. */
 TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
 {
     tcp_sink_t sink;
     ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+    /* Inherited by the accepted socket, so set before the server connects. */
+    int small_buf = 16 * 1024;
+    ASSERT_EQ(
+        setsockopt(sink.listen_fd, SOL_SOCKET, SO_RCVBUF, &small_buf, sizeof(small_buf)),
+        0);
 
     char path[64];
     snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
@@ -2077,7 +2351,12 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     ASSERT_EQ(h.probe.response_done, 1);
     ASSERT_STREQ(h.probe.status, "200");
 
-    size_t payload_len = 512 * 1024;
+    const harness_egress_fd_t *slot = bp_egress_slot(&h);
+    ASSERT_EQ(slot != NULL, 1);
+    ASSERT_EQ(setsockopt(slot->fd, SOL_SOCKET, SO_SNDBUF, &small_buf, sizeof(small_buf)),
+              0);
+
+    size_t payload_len = 2 * 1024 * 1024;
     uint8_t *payload = malloc(payload_len);
     ASSERT_EQ(payload != NULL, 1);
     for (size_t i = 0; i < payload_len; i++)
@@ -2108,8 +2387,13 @@ TEST(mqvpn_tcp_downlink_backpressure_pause_resume)
     }
     ASSERT_EQ(sent_ok, 1);
 
-    /* Fin while the flow is still (very likely) paused/backed up — the
-     * point of this test. */
+    /* The flow must really be paused (send() hit EWOULDBLOCK), with the sink
+     * not yet reading: a bounded wait for the want_write interest. */
+    for (int i = 0; i < 500 && !slot->want_write; i++)
+        bp_pump(&h, &sink, 20);
+    ASSERT_EQ(slot->want_write, 1);
+
+    /* Fin while the flow is paused — the point of this test. */
     ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
 
     /* Now start draining the sink and keep pumping until every byte has
@@ -2408,7 +2692,7 @@ TEST(mqvpn_tcp_active_idle_timeout_evicts)
      * in intended poll-timeout ms (elapsed += wait_ms), which decouples from
      * real time whenever poll returns early — exactly what QUIC-timer churn
      * on a loaded sanitizer-CI runner produces. The idle sweep is gated on
-     * real gettimeofday time (svr_now_us), so this wait must be too, or the
+     * real time (svr_now_us), so this wait must be too, or the
      * iteration budget can expire in <1s of real time and the sweep never
      * fires. 4s real ceiling: a working sweep fires ~1s in; a broken one is
      * still bounded so the suite can't hang. */
@@ -2568,8 +2852,7 @@ TEST(mqvpn_tcp_two_flow_same_conn_idle_eviction)
     free(second.raw_recv_buf);
 }
 
-/* ── Limits (Step 2, carry-over from the relay review): parked-flow
- * eviction ──
+/* ── Limits: parked-flow eviction ──
  *
  * A flow parked by UPLINK backpressure (uplink_withheld=1: the server's
  * send_body() to the client is -XQC_EAGAIN'ing because the client's H3
@@ -2579,79 +2862,456 @@ TEST(mqvpn_tcp_two_flow_same_conn_idle_eviction)
  * its ONLY collector, which is exactly what last_activity_us's "no bytes
  * moved, no refresh" rule (see that field's comment in tcp_egress.c) is for.
  *
- * Forced black-box, no syscall interposition needed: the sink floods the
- * egress connection with more data than the default initial H3 stream
- * receive window (XQC_MIN_RECV_WINDOW = 63000 bytes, third_party/xquic/src/
- * transport/xqc_conn.h) while the probe (via suppress_body_drain) never
- * calls recv_body — so xquic never sends a MAX_STREAM_DATA update and the
- * window never reopens. This is a real, not mocked, EAGAIN. */
+ * Forced black-box, no syscall interposition needed: the probe opens its
+ * request with a per-stream receive rate (so the stream window is small,
+ * not the 16 MiB default) and never reads, so xquic never sends a
+ * MAX_STREAM_DATA update and the window never reopens. The sink floods the
+ * egress connection until the relay's send_body() returns a real -XQC_EAGAIN
+ * and the flow parks (want_read dropped, asserted before the idle check).
+ * What a parked flow holds is bounded by the H3 receive-buffer limit plus
+ * that stream window. */
 TEST(mqvpn_tcp_parked_flow_idle_eviction)
 {
     tcp_sink_t sink;
     ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* we drive sends manually below */
 
-    char path[64];
-    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
-
     harness_t h;
-    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
-                            harness_cfg_allow_127_idle_timeout_1),
+    harness_probe_opts_t opts = {.recv_rate_bytes_per_sec = 125000000};
+    ASSERT_EQ(harness_start_opts(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                                 harness_cfg_allow_127_idle_timeout_1, &opts),
               0);
-    h.probe.path = path;
-    h.probe.suppress_body_drain = 1;
 
     harness_pump(&h, &h.probe.handshake_done, 10000);
     ASSERT_EQ(h.probe.handshake_done, 1);
-    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
 
-    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
-    ASSERT_EQ(h.probe.response_done, 1);
-    ASSERT_STREQ(h.probe.status, "200");
+    probe_req_t r;
+    ASSERT_EQ(probe_open_tcp_request(&h, &r, (uint16_t)sink.port), 0);
+    r.reading = 0; /* the probe never reads the body */
+    for (int i = 0; i < 500 && !r.status[0]; i++)
+        bp_pump(&h, &sink, 20);
+    ASSERT_STREQ(r.status, "200");
+    for (int i = 0; i < 100 && sink.conn_fd < 0; i++)
+        bp_pump(&h, &sink, 20);
     ASSERT_EQ(sink.conn_fd >= 0, 1);
 
-    /* Flood up to 256 KiB from the sink's side — comfortably more than the
-     * ~63000-byte default window. Alternates send()+pump so the relay's
-     * recv()/send_body() loop actually runs while data is available;
-     * bails early if the sink's OWN kernel send buffer fills first (plenty
-     * has already been offered by then). */
-    uint8_t junk[4096];
+    /* Flood from the sink's side until the relay parks the flow (read
+     * interest dropped), bounded in real time. */
+    const harness_egress_fd_t *slot = bp_egress_slot(&h);
+    ASSERT_EQ(slot != NULL, 1);
+    uint8_t junk[65536];
     memset(junk, 0x5a, sizeof(junk));
-    for (int i = 0; i < 64; i++) {
-        ssize_t sent =
-            send(sink.conn_fd, junk, sizeof(junk), MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-        int never = 0;
-        harness_pump(&h, &never, 20);
+    uint64_t t0 = test_now_us();
+    while (slot->want_read && test_now_us() - t0 < 5000000ull) {
+        (void)send(sink.conn_fd, junk, sizeof(junk), MSG_DONTWAIT | MSG_NOSIGNAL);
+        bp_pump(&h, &sink, 5);
     }
+    ASSERT_EQ(slot->want_read, 0);
 
-    /* Quiet now: no more sink sends, no probe reads. Same bounded wait as
-     * the ACTIVE idle-timeout test above. Checks both sides, like that
-     * test: the sink's real fd close AND the probe's H3 stream close (a
-     * server-initiated stream close/reset is a control-frame operation, not
-     * subject to the very stream-data flow control that's stuck full here,
-     * so it isn't blocked by the probe's own non-draining). */
+    /* Quiet now: no more sink sends, no probe reads. Bounded wait for the
+     * idle sweep, the flow's only collector. Checks both sides: the sink's
+     * real fd close AND the probe's H3 stream close (a server-initiated
+     * stream close/reset is a control-frame operation, not subject to the
+     * stream-data flow control that's stuck full here). */
     /* Real-wall-clock bound, not iteration count — the idle sweep fires on
-     * real gettimeofday time, while harness_pump's budget accounting can run
+     * real time (svr_now_us), while harness_pump's budget accounting can run
      * ahead of real time under CI poll churn (see idle-timeout-evicts). */
     int sink_eof = 0;
     uint64_t wait_start_us = test_now_us();
-    while (!(sink_eof && h.probe.request_closed) &&
-           test_now_us() - wait_start_us < 4000000ull) {
+    while (!(sink_eof && r.closed) && test_now_us() - wait_start_us < 4000000ull) {
         int never = 0;
         harness_pump(&h, &never, 20);
         if (!sink_eof) {
             uint8_t buf[4096];
-            ssize_t n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT);
+            ssize_t n;
+            while ((n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {}
             if (n == 0) sink_eof = 1;
         }
     }
     ASSERT_EQ(sink_eof, 1);
-    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(r.closed, 1);
 
     harness_stop(&h);
     tcp_sink_close(&sink);
-    free(h.probe.raw_recv_buf);
 }
+
+/* Uplink: the destination never reads, so the sender must stop. The bytes
+ * xquic accepts are bounded by what the path can hold (stream window, the
+ * H3 body buffer, one relay stash, the two socket queues); once the
+ * destination reads, everything accepted arrives intact. */
+TEST(mqvpn_tcp_uplink_stalled_destination_is_bounded)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* never reads */
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+
+    probe_req_t r;
+    ASSERT_EQ(probe_open_tcp_request(&h, &r, (uint16_t)sink.port), 0);
+    for (int i = 0; i < 500 && !r.status[0]; i++)
+        bp_pump(&h, &sink, 20);
+    ASSERT_STREQ(r.status, "200");
+    for (int i = 0; i < 100 && sink.conn_fd < 0; i++)
+        bp_pump(&h, &sink, 20);
+    ASSERT_EQ(sink.conn_fd >= 0, 1);
+
+    enum { CHUNK = 65536 };
+    const uint64_t total = 64ull << 20;
+    uint8_t chunk[CHUNK];
+    uint64_t off = 0, since_pump = 0;
+    uint64_t eagain_since = 0, t0 = test_now_us();
+    int stalled = 0;
+    /* No time limit, which a slow build would hit: the loop ends on a stall,
+     * or once all of `total` is accepted, which fails the bound below. */
+    while (off < total) {
+        size_t n = (size_t)(total - off < CHUNK ? total - off : CHUNK);
+        for (size_t i = 0; i < n; i++)
+            chunk[i] = bp_pat(off + i);
+        ssize_t sent = xqc_h3_request_send_body(r.req, chunk, n, 0);
+        if (sent > 0) {
+            off += (uint64_t)sent;
+            since_pump += (uint64_t)sent;
+            eagain_since = 0;
+            if (since_pump >= 256 * 1024) {
+                since_pump = 0;
+                int never = 0;
+                harness_pump(&h, &never, 1);
+            }
+            continue;
+        }
+        ASSERT_EQ(sent, -XQC_EAGAIN);
+        uint64_t now = test_now_us();
+        if (!eagain_since) eagain_since = now;
+        if (now - eagain_since >= 2000000ull) {
+            stalled = 1;
+            break;
+        }
+        bp_pump(&h, &sink, 5);
+    }
+
+    const harness_egress_fd_t *slot = bp_egress_slot(&h);
+    ASSERT_EQ(slot != NULL, 1);
+    uint64_t bound = (16ull << 20) + 64 * 1024 + 4096 + 16384 +
+                     (uint64_t)bp_queue_bytes(sink.conn_fd, SIOCINQ) +
+                     (uint64_t)bp_queue_bytes(slot->fd, SIOCOUTQ) + (1ull << 20);
+    ASSERT_EQ(off <= bound, 1);
+    ASSERT_EQ(stalled, 1);
+
+    /* The destination starts reading: everything accepted arrives, intact. */
+    uint64_t got = 0;
+    int bad = 0;
+    uint8_t buf[65536];
+    t0 = test_now_us();
+    while (got < off && test_now_us() - t0 < 30000000ull) {
+        ssize_t n;
+        while ((n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT)) > 0) {
+            for (ssize_t i = 0; i < n; i++)
+                if (buf[i] != bp_pat(got + (uint64_t)i)) bad = 1;
+            got += (uint64_t)n;
+        }
+        bp_pump(&h, &sink, 5);
+    }
+    ASSERT_EQ(got, off);
+    ASSERT_EQ(bad, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+}
+
+/* Downlink: the probe stops reading, so the server must stop reading the
+ * destination and the destination's send() must block. Resuming the read
+ * from outside any callback must wake the engine at once and finish the
+ * transfer. */
+TEST(mqvpn_tcp_downlink_stalled_probe_resumes)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+
+    probe_req_t r;
+    ASSERT_EQ(probe_open_tcp_request(&h, &r, (uint16_t)sink.port), 0);
+    r.reading = 0; /* the probe never reads the body */
+    r.check_pattern = 1;
+    for (int i = 0; i < 500 && !r.status[0]; i++)
+        bp_pump(&h, &sink, 20);
+    ASSERT_STREQ(r.status, "200");
+    for (int i = 0; i < 100 && sink.conn_fd < 0; i++)
+        bp_pump(&h, &sink, 20);
+    ASSERT_EQ(sink.conn_fd >= 0, 1);
+
+    const uint64_t total = 64ull << 20;
+    uint64_t sent = 0;
+    uint8_t chunk[65536];
+
+    /* A sustained stall: read interest off for 500 ms straight while the
+     * destination's send() is blocked (a momentarily full send queue turns
+     * interest back on; exhausted flow-control credit does not). */
+    uint64_t t0 = test_now_us(), off_since = 0;
+    int stalled = 0, dst_blocked = 0;
+    while (!stalled && test_now_us() - t0 < 10000000ull) {
+        dst_blocked = 0;
+        while (sent < total) {
+            size_t n =
+                (size_t)(total - sent < sizeof(chunk) ? total - sent : sizeof(chunk));
+            for (size_t i = 0; i < n; i++)
+                chunk[i] = bp_pat(sent + i);
+            ssize_t w = send(sink.conn_fd, chunk, n, MSG_DONTWAIT | MSG_NOSIGNAL);
+            if (w > 0) {
+                sent += (uint64_t)w;
+                continue;
+            }
+            ASSERT_EQ(errno == EAGAIN || errno == EWOULDBLOCK, 1);
+            dst_blocked = 1;
+            break;
+        }
+        bp_pump(&h, &sink, 2);
+        const harness_egress_fd_t *slot = bp_egress_slot(&h);
+        if (slot && !slot->want_read) {
+            if (!off_since) off_since = test_now_us();
+            if (dst_blocked && test_now_us() - off_since >= 500000ull) stalled = 1;
+        } else {
+            off_since = 0;
+        }
+    }
+    ASSERT_EQ(stalled, 1);
+    ASSERT_EQ(r.body_rcvd, 0);
+    ASSERT_EQ(harness_held_bytes(&h, &sink, (size_t)sent) > 0, 1);
+
+    /* Resume outside any callback: the engine must ask to run right away. */
+    uint64_t wakes = h.probe_wake_count;
+    uint8_t buf[4096];
+    unsigned char fin = 0;
+    ssize_t n;
+    while ((n = xqc_h3_request_recv_body(r.req, buf, sizeof(buf), &fin)) > 0) {
+        for (ssize_t i = 0; i < n; i++)
+            if (buf[i] != bp_pat(r.body_rcvd + (uint64_t)i)) {
+                printf("FAIL\n    %s:%d: body pattern broken at %llu\n", __FILE__,
+                       __LINE__, (unsigned long long)(r.body_rcvd + (uint64_t)i));
+                exit(1);
+            }
+        r.body_rcvd += (size_t)n;
+    }
+    ASSERT_EQ(n, -XQC_EAGAIN);
+    ASSERT_EQ(h.probe_wake_count > wakes, 1);
+    ASSERT_EQ(h.probe_last_wake_us <= 1000, 1);
+    r.reading = 1;
+
+    /* Fail on a stall, not on a slow build: the deadline restarts on progress. */
+    size_t last_rcvd = r.body_rcvd;
+    t0 = test_now_us();
+    while (r.body_rcvd < total && test_now_us() - t0 < 10000000ull) {
+        if (r.body_rcvd != last_rcvd) {
+            last_rcvd = r.body_rcvd;
+            t0 = test_now_us();
+        }
+        while (sent < total) {
+            size_t m =
+                (size_t)(total - sent < sizeof(chunk) ? total - sent : sizeof(chunk));
+            for (size_t i = 0; i < m; i++)
+                chunk[i] = bp_pat(sent + i);
+            ssize_t w = send(sink.conn_fd, chunk, m, MSG_DONTWAIT | MSG_NOSIGNAL);
+            if (w <= 0) break;
+            sent += (uint64_t)w;
+        }
+        bp_pump(&h, &sink, 2);
+    }
+    ASSERT_EQ(sent, total);
+    ASSERT_EQ(r.body_rcvd, total);
+    ASSERT_EQ(r.bad_pattern, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+}
+
+/* The head-of-line tests measure time, which MSan stretches about 100x, so
+ * an MSan build leaves them out. */
+#define MQVPN_TEST_MSAN 0
+#ifdef __has_feature /* nested: gcc 13 has no __has_feature and cannot parse it */
+#  if __has_feature(memory_sanitizer)
+#    undef MQVPN_TEST_MSAN
+#    define MQVPN_TEST_MSAN 1
+#  endif
+#endif
+
+#if !MQVPN_TEST_MSAN
+/* Head-of-line blocking: with a connection receive-rate limit the connection
+ * window is small, and every flow's share of it is a quarter. Flows whose
+ * reader stalled must not stop a flow that keeps reading. */
+#  define HOL_MAX_FLOWS 4
+
+typedef struct {
+    tcp_sink_t sink;
+    probe_req_t r;
+    uint64_t sent;
+} hol_flow_t;
+
+static void
+hol_pump(harness_t *h, hol_flow_t *f, int nf, int ms)
+{
+    for (int i = 0; i < nf; i++)
+        tcp_sink_pump(&f[i].sink);
+    int never = 0;
+    harness_pump(h, &never, ms);
+}
+
+static const harness_egress_fd_t *
+hol_egress_slot(const harness_t *h, const tcp_sink_t *sink)
+{
+    for (int i = 0; i < HARNESS_MAX_EGRESS_FDS; i++) {
+        if (!h->egress_fds[i].active) continue;
+        struct sockaddr_in a;
+        socklen_t al = sizeof(a);
+        if (getpeername(h->egress_fds[i].fd, (struct sockaddr *)&a, &al) == 0 &&
+            ntohs(a.sin_port) == sink->port)
+            return &h->egress_fds[i];
+    }
+    return NULL;
+}
+
+/* Opens flow f[i] (a sink and a request to it) and waits until it is ACTIVE. */
+static void
+hol_open(harness_t *h, hol_flow_t *f, int i)
+{
+    hol_flow_t *x = &f[i];
+    x->sent = 0;
+    if (tcp_sink_open(&x->sink, /*echo=*/0) != 0 ||
+        probe_open_tcp_request(h, &x->r, (uint16_t)x->sink.port) != 0) {
+        printf("FAIL\n    %s:%d: cannot open flow %d\n", __FILE__, __LINE__, i + 1);
+        exit(1);
+    }
+    for (int k = 0; k < 500 && !x->r.status[0]; k++)
+        hol_pump(h, f, i + 1, 20);
+    ASSERT_STREQ(x->r.status, "200");
+    for (int k = 0; k < 100 && x->sink.conn_fd < 0; k++)
+        hol_pump(h, f, i + 1, 20);
+    ASSERT_EQ(x->sink.conn_fd >= 0, 1);
+}
+
+/* The sink offers pattern bytes up to `total`; returns once nothing more fits. */
+static void
+hol_sink_send(hol_flow_t *x, uint64_t total, int *blocked)
+{
+    uint8_t chunk[65536];
+    *blocked = 0;
+    while (x->sent < total) {
+        size_t n =
+            (size_t)(total - x->sent < sizeof(chunk) ? total - x->sent : sizeof(chunk));
+        for (size_t k = 0; k < n; k++)
+            chunk[k] = bp_pat(x->sent + k);
+        ssize_t w = send(x->sink.conn_fd, chunk, n, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (w <= 0) {
+            ASSERT_EQ(errno == EAGAIN || errno == EWOULDBLOCK, 1);
+            *blocked = 1;
+            return;
+        }
+        x->sent += (uint64_t)w;
+    }
+}
+
+/* Flow f[i], whose probe never reads, stalls: its egress fd keeps read
+ * interest off for 500 ms straight while the sink's send() is blocked. */
+static void
+hol_stall(harness_t *h, hol_flow_t *f, int i)
+{
+    hol_flow_t *x = &f[i];
+    x->r.reading = 0;
+    uint64_t t0 = test_now_us(), off_since = 0;
+    int stalled = 0;
+    while (!stalled && test_now_us() - t0 < 10000000ull) {
+        int blocked;
+        hol_sink_send(x, 64ull << 20, &blocked);
+        hol_pump(h, f, i + 1, 2);
+        const harness_egress_fd_t *slot = hol_egress_slot(h, &x->sink);
+        if (slot && !slot->want_read) {
+            if (!off_since) off_since = test_now_us();
+            if (blocked && test_now_us() - off_since >= 500000ull) stalled = 1;
+        } else {
+            off_since = 0;
+        }
+    }
+    ASSERT_EQ(stalled, 1);
+    ASSERT_EQ(x->r.body_rcvd, 0);
+    ASSERT_EQ(harness_held_bytes(h, &x->sink, (size_t)x->sent) > 0, 1);
+}
+
+/* `nstall` flows stall (with s2c delay `delay_us`, lowered to `drop_to_us`
+ * afterwards when non-zero); the next flow then downloads 4 MiB, intact,
+ * within `limit_us`. */
+static void
+hol_run(int nstall, uint32_t delay_us, uint32_t drop_to_us, uint64_t limit_us)
+{
+    harness_probe_opts_t opts = {.recv_rate_bytes_per_sec = 125000000,
+                                 .s2c_delay_us = delay_us};
+    harness_t h;
+    ASSERT_EQ(harness_start_opts(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                                 harness_cfg_allow_127, &opts),
+              0);
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+
+    hol_flow_t f[HOL_MAX_FLOWS];
+    for (int i = 0; i < nstall; i++) {
+        hol_open(&h, f, i);
+        hol_stall(&h, f, i);
+    }
+    if (drop_to_us) {
+        h.s2c_delay_us = drop_to_us;
+        uint64_t t0 = test_now_us();
+        while (test_now_us() - t0 < 2000000ull)
+            hol_pump(&h, f, nstall, 5);
+    }
+
+    const uint64_t total = 4ull << 20;
+    hol_flow_t *m = &f[nstall];
+    hol_open(&h, f, nstall);
+    m->r.check_pattern = 1;
+    uint64_t t0 = test_now_us();
+    while (m->r.body_rcvd < total && test_now_us() - t0 < limit_us) {
+        int blocked;
+        hol_sink_send(m, total, &blocked);
+        hol_pump(&h, f, nstall + 1, 2);
+    }
+    ASSERT_EQ(m->r.body_rcvd, total);
+    ASSERT_EQ(m->r.bad_pattern, 0);
+
+    /* The stalled flows were held the whole time, not reset or closed. */
+    for (int i = 0; i < nstall; i++) {
+        ASSERT_EQ(f[i].r.closed, 0);
+        ASSERT_EQ(f[i].r.body_rcvd, 0);
+        const harness_egress_fd_t *slot = hol_egress_slot(&h, &f[i].sink);
+        ASSERT_EQ(slot != NULL, 1);
+        ASSERT_EQ(slot->want_read, 0);
+    }
+
+    harness_stop(&h);
+    for (int i = 0; i <= nstall; i++)
+        tcp_sink_close(&f[i].sink);
+}
+
+TEST(mqvpn_tcp_hol_one_stalled_flow)
+{
+    hol_run(1, 30000, 0, 5000000ull);
+}
+
+TEST(mqvpn_tcp_hol_three_stalled_flows)
+{
+    hol_run(3, 30000, 0, 10000000ull);
+}
+
+TEST(mqvpn_tcp_hol_rtt_drop)
+{
+    hol_run(1, 60000, 2000, 5000000ull);
+}
+
+#endif /* !MQVPN_TEST_MSAN */
 
 /* ── svr_tcp_egress_errno_to_status — pure function ── */
 
@@ -3262,6 +3922,13 @@ main(void)
     run_mqvpn_tcp_active_idle_timeout_evicts();
     run_mqvpn_tcp_two_flow_same_conn_idle_eviction();
     run_mqvpn_tcp_parked_flow_idle_eviction();
+    run_mqvpn_tcp_uplink_stalled_destination_is_bounded();
+    run_mqvpn_tcp_downlink_stalled_probe_resumes();
+#if !MQVPN_TEST_MSAN
+    run_mqvpn_tcp_hol_one_stalled_flow();
+    run_mqvpn_tcp_hol_three_stalled_flows();
+    run_mqvpn_tcp_hol_rtt_drop();
+#endif
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_connect_ip_v6_address_assign_is_slash_128();

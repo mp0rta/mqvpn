@@ -89,7 +89,7 @@ class NetworkMonitorTest {
                 NetworkCapabilities.TRANSPORT_CELLULAR,
                 NetworkCapabilities.TRANSPORT_ETHERNET,
             ),
-            NetworkMonitor.holdTransports(holdBluetooth = false),
+            NetworkMonitor.holdTransports(PathPolicy()),
         )
     }
 
@@ -102,7 +102,7 @@ class NetworkMonitorTest {
                 NetworkCapabilities.TRANSPORT_ETHERNET,
                 NetworkCapabilities.TRANSPORT_BLUETOOTH,
             ),
-            NetworkMonitor.holdTransports(holdBluetooth = true),
+            NetworkMonitor.holdTransports(PathPolicy(bluetooth = true)),
         )
     }
 
@@ -120,7 +120,7 @@ class NetworkMonitorTest {
     fun `start adds the bluetooth hold when asked`() {
         val context = RuntimeEnvironment.getApplication()
         val registered = registeredCallbacks(context)
-        val monitor = NetworkMonitor(context, holdBluetooth = true)
+        val monitor = NetworkMonitor(context, PathPolicy(bluetooth = true))
         monitor.start {}
         assertEquals(1 + 4, registered.size)
         monitor.stop()
@@ -130,7 +130,7 @@ class NetworkMonitorTest {
     fun `stop releases the listener and every hold`() {
         val context = RuntimeEnvironment.getApplication()
         val registered = registeredCallbacks(context)
-        val monitor = NetworkMonitor(context, holdBluetooth = true)
+        val monitor = NetworkMonitor(context, PathPolicy(bluetooth = true))
         monitor.start {}
         monitor.stop()
         assertTrue("still registered: $registered", registered.isEmpty())
@@ -189,6 +189,21 @@ class NetworkMonitorTest {
 
         assertEquals(1, events.count { it is NetworkEvent.Available })
         assertEquals(1, events.count { it is NetworkEvent.Lost })
+        monitor.stop()
+    }
+
+    @Test
+    fun `a disallowed transport is neither announced nor counted active`() {
+        val context = RuntimeEnvironment.getApplication()
+        val monitor = NetworkMonitor(context, PathPolicy(wifi = false))
+        val events = mutableListOf<NetworkEvent>()
+        monitor.start { events.add(it) }
+        val callbacks = registeredCallbacks(context).toList()
+        val net = ShadowNetwork.newInstance(703)
+        callbacks.forEach { it.onCapabilitiesChanged(net, wifiCaps()) }
+
+        assertTrue(events.isEmpty())
+        assertTrue(monitor.activeNetworks.isEmpty())
         monitor.stop()
     }
 

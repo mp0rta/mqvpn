@@ -22,17 +22,19 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Android keeps a network connected only while a request is served by it,
  * and the default request is served by one network at a time. The monitor
- * therefore holds one request per transport while it runs: without them an
- * Ethernet adapter takes Wi-Fi down, and a Bluetooth tether never comes up
- * next to Wi-Fi. The holds only keep networks connected; paths still come
- * from the listening callback.
+ * therefore holds one request per transport the [policy] allows while it
+ * runs: without them an Ethernet adapter takes Wi-Fi down, and a Bluetooth
+ * tether never comes up next to Wi-Fi. The holds only keep networks
+ * connected; paths still come from the listening callback.
  *
- * @param holdBluetooth Also hold a Bluetooth-tethered network. When false it
- *   is still used as a path whenever Android connects it on its own.
+ * @param policy Transports that may carry paths. A disallowed transport is
+ *   not held and a network of that type is never announced, Bluetooth
+ *   included: with `bluetooth = false` a tether Android connects on its own
+ *   is ignored too.
  */
 class NetworkMonitor(
     private val context: Context,
-    private val holdBluetooth: Boolean = false,
+    private val policy: PathPolicy = PathPolicy(),
 ) {
 
     private val cm = context.getSystemService<ConnectivityManager>()!!
@@ -88,6 +90,7 @@ class NetworkMonitor(
             }
 
             private fun announce(path: NetworkPath) {
+                if (!policy.allows(path.type)) return
                 val isNew = _activeNetworks.put(path.network, path) == null
                 if (isNew) {
                     Log.d(TAG, "Available: $path")
@@ -101,7 +104,7 @@ class NetworkMonitor(
         cm.registerNetworkCallback(request, cb)
         callback = cb
 
-        for (transport in holdTransports(holdBluetooth)) {
+        for (transport in holdTransports(policy)) {
             val hold = ConnectivityManager.NetworkCallback()
             cm.requestNetwork(
                 NetworkRequest.Builder()
@@ -139,12 +142,12 @@ class NetworkMonitor(
             else -> PathType.OTHER
         }
 
-        /** Transports whose network is held while the monitor runs. */
-        internal fun holdTransports(holdBluetooth: Boolean): List<Int> = buildList {
-            add(NetworkCapabilities.TRANSPORT_WIFI)
-            add(NetworkCapabilities.TRANSPORT_CELLULAR)
-            add(NetworkCapabilities.TRANSPORT_ETHERNET)
-            if (holdBluetooth) add(NetworkCapabilities.TRANSPORT_BLUETOOTH)
+        /** Transports of the [policy] whose network is held while the monitor runs. */
+        internal fun holdTransports(policy: PathPolicy): List<Int> = buildList {
+            if (policy.wifi) add(NetworkCapabilities.TRANSPORT_WIFI)
+            if (policy.cellular) add(NetworkCapabilities.TRANSPORT_CELLULAR)
+            if (policy.ethernet) add(NetworkCapabilities.TRANSPORT_ETHERNET)
+            if (policy.bluetooth) add(NetworkCapabilities.TRANSPORT_BLUETOOTH)
         }
 
         internal fun networkName(network: Network, type: PathType): String =

@@ -29,7 +29,7 @@
 #
 # Reorder ON vs OFF (--reorder on|off):
 #   The "is reorder net-positive?" follow-up. --reorder off runs each selected
-#   environment ONCE per repeat with [Reorder] Enabled=off (pure RAW
+#   environment ONCE per repeat with [Reorder] Enabled=false (pure RAW
 #   pass-through; MaxWaitMs/CapPackets are irrelevant so the wait/cap sweep is
 #   skipped) and writes a baseline CSV (default reorder_off_DATE.csv). The ON
 #   data is reused from the main perf sweep; sweep_reorder_analyze.py --off-csv
@@ -148,7 +148,7 @@ usage: sudo PICOQUICDEMO=<path> $0 [options]
   --mode <perf|scale>  perf (default) or scale-mode exercise
   --reorder <on|off>   on (default) = the normal perf/scale sweep. off = RAW
                        baseline: each env once per repeat with [Reorder]
-                       Enabled=off, no wait/cap loop, default out reorder_off_*.csv
+                       Enabled=false, no wait/cap loop, default out reorder_off_*.csv
                        (feed it to sweep_reorder_analyze.py --off-csv). Keep the
                        OFF CSV separate from the ON sweep — do NOT reuse the ON
                        run's --out, or the off/off rows mix into one file.
@@ -280,19 +280,19 @@ trap cleanup_all EXIT
 # [ReorderRule]. CapPackets is the cap key (NOT CapPacketsPerFlow).
 write_ini() {
     local wait="$1" cap="$2"
-    # --reorder off: emit a minimal RAW-baseline INI. Enabled=off bypasses the
+    # --reorder off: emit a minimal RAW-baseline INI. Enabled=false bypasses the
     # whole engine, so MaxWaitMs/CapPackets/[ReorderRule] are irrelevant — omit
     # them rather than write the "off" sentinel wait/cap into numeric keys.
     if [ "$REORDER_MODE" = "off" ]; then
         {
             echo "[Reorder]"
-            echo "Enabled = off"
+            echo "Enabled = false"
         } >"$INI_FILE"
         return 0
     fi
     {
         echo "[Reorder]"
-        echo "Enabled = on"
+        echo "Enabled = true"
         echo "MaxWaitMs = ${wait}"
         echo "CapPackets = ${cap}"
         if [ -n "$MAX_BYTES_PER_FLOW" ]; then
@@ -586,7 +586,7 @@ run_perf_sweep() {
 }
 
 # ─── reorder-OFF baseline sweep (--reorder off) ──────────────────────────────
-# Each selected env once per repeat with [Reorder] Enabled=off. No wait/cap
+# Each selected env once per repeat with [Reorder] Enabled=false. No wait/cap
 # loop (RAW pass-through ignores them), so the row carries the "off" sentinel in
 # the max_wait_ms/cap_pkts columns and all-zero reorder counters (the OFF engine
 # emits zeroed stats). Honors --env / --axis subsetting via select_envs; default
@@ -599,7 +599,7 @@ run_off_sweep() {
 
     local envs rep env
     envs="$(select_envs)"
-    echo "[off] RAW baseline (Enabled=off); envs: ${envs}"
+    echo "[off] RAW baseline (Enabled=false); envs: ${envs}"
     echo "[off] repeats: ${REPEATS}  out: ${OUT}"
 
     for env in $envs; do

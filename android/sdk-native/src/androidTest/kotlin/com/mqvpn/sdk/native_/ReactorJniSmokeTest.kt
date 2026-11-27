@@ -65,7 +65,7 @@ class ReactorJniSmokeTest {
                 val sock = DatagramSocket(InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
                 fd = ParcelFileDescriptor.fromDatagramSocket(sock).detachFd()
                 sock.close()
-                val h = NativeBridge.reactorAddPath(r, client, fd, "lo")
+                val h = NativeBridge.reactorAddPath(r, client, fd, "lo", 0)
                 assertTrue("reactorAddPath returned $h", h >= 0)
                 // Attached, nothing readable: the wait times out with 0 drains.
                 assertEquals(0, NativeBridge.reactorWait(r, client, 10))

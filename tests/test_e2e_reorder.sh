@@ -6,7 +6,7 @@
 # (Phase 1/2) against the real xquic engine.
 #
 # What this verifies:
-#   Phase A (negotiation): with [Reorder] Enabled=on on BOTH ends, the tunnel
+#   Phase A (negotiation): with [Reorder] Enabled=true on BOTH ends, the tunnel
 #     establishes and the mqvpn-reorder capability is negotiated. We key on the
 #     real INFO log markers emitted by the implementation:
 #       - server: "client advertised mqvpn-reorder"
@@ -30,11 +30,11 @@
 #     to a tunnel ping, like tests/test_e2e_backup_fec.sh.)
 #
 #   Phase C (regression / wire-compat): a second full run with
-#     [Reorder] Enabled=off confirms the tunnel still works unchanged and that
+#     [Reorder] Enabled=false confirms the tunnel still works unchanged and that
 #     NO reorder negotiation occurs (markers absent), proving the feature is a
 #     no-op when disabled.
 #
-#   Phase D (mixed): client Enabled=on, server Enabled=off. The server does not
+#   Phase D (mixed): client Enabled=true, server Enabled=false. The server does not
 #     echo mqvpn-reorder, so the client never stamps; its TUN MTU must then be
 #     the reorder-OFF MTU, not 8 bytes less.
 #
@@ -80,7 +80,7 @@ bench_check_test_deps nc jq
 
 # ── Generate the reorder INI (config mechanism: --config base + CLI override) ──
 # Keys/values cross-checked against src/config.c:
-#   [Reorder] Enabled  on/off   -> parse_reorder_enabled
+#   [Reorder] Enabled  true/false -> cfg_keys[] (CFG_BOOL)
 #   [Reorder] MaxWaitMs <ms>     -> cfg_keys[] (SEC_REORDER row)
 #   [ReorderRule] Proto udp      -> parse_reorder_proto
 #   [ReorderRule] Port  <P>      -> handle_kv SEC_REORDER_RULE arm
@@ -96,7 +96,7 @@ MAX_WAIT_MS=60
 PATH_B_DELAY_MS=40
 cat >"$INI_ON" <<EOF
 [Reorder]
-Enabled = on
+Enabled = true
 MaxWaitMs = ${MAX_WAIT_MS}
 
 [ReorderRule]
@@ -107,7 +107,7 @@ EOF
 
 cat >"$INI_OFF" <<EOF
 [Reorder]
-Enabled = off
+Enabled = false
 EOF
 
 # ── Topology: 2 paths, RTT spread on path 1 so striping reorders inner pkts ──
@@ -390,10 +390,10 @@ fi
 
 # With reorder OFF, the capability must NOT be negotiated (no header advertised).
 if grep -q "mqvpn-reorder" "$SERVER_LOG_OFF" "$CLIENT_LOG_OFF"; then
-    echo "FAIL: reorder negotiation occurred despite Enabled=off"
+    echo "FAIL: reorder negotiation occurred despite Enabled=false"
     fail=1
 else
-    echo "PASS: no reorder negotiation with Enabled=off (no-op confirmed)"
+    echo "PASS: no reorder negotiation with Enabled=false (no-op confirmed)"
 fi
 
 # Inner data still flows with reorder OFF.

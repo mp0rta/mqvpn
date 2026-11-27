@@ -143,16 +143,16 @@ static int g_client_disconnected_calls = 0;
 static int g_tun_output_calls = 0;
 static uint8_t g_tun_last_dst[4];
 
-/* xquic's own internal clock (exported by the static lib, forward-declared
- * here as third_party/xquic/tests/masque_client.c does — it is not part of
- * the public xquic.h). engine_cbs below leaves realtime_ts/monotonic_ts
- * unset, so xquic's internal idle-timeout/RTT bookkeeping runs on THIS
- * clock; a hand-rolled CLOCK_MONOTONIC timestamp handed to
- * xqc_engine_packet_process()'s recv_time instead is a DIFFERENT clock
- * (different epoch/magnitude) from what that bookkeeping compares against,
- * which manifests as the connection's idle timer appearing to have already
- * expired and tearing the connection down before the handshake completes. */
-extern xqc_usec_t xqc_now(void);
+/* xquic's internal clock (exported by the static lib, forward-declared here
+ * as third_party/xquic/tests/masque_client.c does — it is not part of the
+ * public xquic.h). It is process-wide: the mqvpn server engine sets it, and
+ * engine_cbs below leaves realtime_ts/monotonic_ts unset, so this client
+ * engine's idle-timeout/RTT bookkeeping runs on it too; a recv_time from any
+ * other clock is a DIFFERENT epoch/magnitude from what that bookkeeping
+ * compares against, which manifests as the connection's idle timer
+ * appearing to have already expired and tearing the connection down before
+ * the handshake completes. */
+extern xqc_timestamp_pt xqc_monotonic_timestamp;
 
 static ssize_t
 cli_write_socket(const unsigned char *buf, size_t size, const struct sockaddr *peer,
@@ -437,9 +437,9 @@ pump_once(mqvpn_server_t *svr, void *svr_tctx, struct sockaddr_in *cli_addr, int
         ssize_t n = recvfrom(cli_fd, buf, sizeof(buf), MSG_DONTWAIT,
                              (struct sockaddr *)&from, &flen);
         if (n <= 0) break;
-        xqc_engine_packet_process(g_cli_engine, buf, (size_t)n,
-                                  (struct sockaddr *)cli_addr, sizeof(*cli_addr),
-                                  (struct sockaddr *)&from, flen, xqc_now(), NULL);
+        xqc_engine_packet_process(
+            g_cli_engine, buf, (size_t)n, (struct sockaddr *)cli_addr, sizeof(*cli_addr),
+            (struct sockaddr *)&from, flen, xqc_monotonic_timestamp(), NULL);
     }
 }
 

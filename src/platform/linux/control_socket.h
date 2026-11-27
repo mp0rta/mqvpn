@@ -21,14 +21,14 @@
 #include "libmqvpn.h"
 
 /* Forward-decl so consumers that only want CTRL_MAX_RESP_BYTES (e.g.
- * tests/test_control_response_bound.c) don't transitively pull libevent
+ * a standalone test or tool) don't transitively pull libevent
  * headers. The control_socket.c implementation itself includes
  * <event2/event.h> directly. */
 struct event_base;
 
 /* Maximum response size. Worst-case get_status with MQVPN_MAX_USERS=64 and
  * MQVPN_MAX_PATHS=8 produces ~210 KB; round up to 256 KB. The exact bound is
- * verified by tests/test_control_response_bound.c — bump it if either limit
+ * verified by tests/test_control_socket.c — bump it if either limit
  * grows. */
 #define CTRL_MAX_RESP_BYTES (256 * 1024)
 
@@ -39,7 +39,8 @@ typedef struct ctrl_socket_s ctrl_socket_t;
  * time through this getter instead of borrowing pointers. rx_ctx is
  * opaque; fn may be NULL (reported as 0). No synchronization: the getter
  * runs on the same libevent loop as the RX path. */
-typedef void (*ctrl_rx_stats_fn)(void *rx_ctx, uint64_t *receives, uint64_t *datagrams);
+typedef void (*ctrl_rx_stats_fn)(void *rx_ctx, uint64_t *receives, uint64_t *datagrams,
+                                 uint64_t *queue_drops);
 
 /* addr defaults to "127.0.0.1" when NULL.
  *

@@ -191,8 +191,8 @@ void mqvpn_tcp_lane_bind_h3_request(void *flow_handle, void *h3_request, void *s
 /* Reject a flow whose H3 stream open failed after lwIP already accepted it.
  * Post-SYN-ACK, so abort-only — RAW fallback is forbidden. Never closes the
  * H3 request itself (the caller, cli_tcp_lane_open_stream, either never
- * created one yet or already closed the one it did create on its own
- * failure path) — just tears the pcb + flow down.
+ * created one yet or closes the one it did create after this call) — just
+ * tears the pcb + flow down.
  *
  * Returns 1 if the flow's pcb was tcp_abort()ed inside this call, 0
  * otherwise (NULL handle, or a flow with no live pcb). This matters because
@@ -208,9 +208,8 @@ int mqvpn_tcp_lane_abort_pending(void *flow_handle);
 /* H3 response gating for a bound mqvpn-tcp stream. `stream` is the
  * opaque cli_stream_t* handed to mqvpn_tcp_lane_bind_h3_request — these
  * functions locate the owning flow by its stored f->stream back-pointer (a
- * bounded O(n) walk over the whole flow table, n <= cfg.tcp_max_flows +
- * TCP_LANE_RAW_MARKER_CAP, 256 + 4096 by default; markers have
- * f->stream == NULL so never false-match) rather than caching a flow
+ * bounded O(n) walk over the table's flows that have a stream, n <=
+ * cfg.tcp_max_flows; markers never have one) rather than caching a flow
  * pointer inside cli_stream_t.
  * That keeps the flow table the single source of truth: once a flow is
  * removed, the table walk simply stops finding it — no separate
@@ -335,15 +334,14 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  *
  * fin is LEVEL-TRIGGERED in xquic, not edge-triggered: once the transport
  * FIN has arrived, every subsequent recv call re-reports *fin=1
- * (xqc_h3_request.c:795-801 re-derives *fin from the request's sticky
- * fin_flag whenever body_buf_count == 0, and the n==0 && !*fin EAGAIN
- * guard therefore can never fire again after that point). A caller may
- * therefore stash a data+fin chunk, DROP the local fin flag, and rely on
- * the re-report when its resumed drain calls recv again — the downlink
- * pump's stash/pause path depends on exactly this (see tcp_lane.c). The
- * only side effect of the repeated fin observation is a second
+ * (xqc_h3_request_recv_body() in xqc_h3_request.c re-derives *fin from the request's
+ * sticky fin_flag whenever body_buf_count == 0, and the n==0 && !*fin EAGAIN guard
+ * therefore can never fire again after that point). A caller may therefore stash a
+ * data+fin chunk, DROP the local fin flag, and rely on the re-report when its resumed
+ * drain calls recv again — the downlink pump's stash/pause path depends on exactly this
+ * (see tcp_lane.c). The only side effect of the repeated fin observation is a second
  * xqc_h3_request_end call, which is a harmless timestamp re-record
- * (xqc_h3_request.c:1055-1058: XQC_H3_REQUEST_RECORD_TIME of h3r_end_time,
+ * (xqc_h3_request_end() in xqc_h3_request.c: XQC_H3_REQUEST_RECORD_TIME of h3r_end_time,
  * nothing else). Test doubles for this function must model the re-report
  * or they will falsify the stash-then-resume fin path. */
 #define MQVPN_TCP_LANE_H3_RECV_AGAIN                                       \

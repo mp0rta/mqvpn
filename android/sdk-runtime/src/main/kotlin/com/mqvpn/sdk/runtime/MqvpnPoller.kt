@@ -16,7 +16,8 @@ import kotlin.coroutines.resumeWithException
  * Each loop iteration:
  *   1. Drain the task queue — every enqueued API call, in order
  *   2. Call [tickFn] (clientTick)
- *   3. Call [interestFn] → [nextTimerMs, tunReadable, isIdle]
+ *   3. Call [interestFn] → [nextTimerMs, tunReadable, isIdle]; the loop
+ *      uses nextTimerMs and isIdle (tunReadable is the caller's to act on)
  *   4. [Waiter.await] until nextTimerMs, I/O or a wake — path receive
  *      happens inside, on this thread
  *   5. Report every bad fd the waiter found to [onBadFd]

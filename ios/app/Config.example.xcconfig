@@ -1,0 +1,3 @@
+// Copy to Config.xcconfig and fill in. Config.xcconfig is gitignored.
+// The server is configured in the app's Settings, not at build time.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID

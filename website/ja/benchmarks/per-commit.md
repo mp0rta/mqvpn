@@ -33,7 +33,7 @@ const filteredAggregateRows = computed(() => {
 
 # コミットごとのベンチマーク
 
-<p class="page-desc">main へのプッシュごとに実行。最新 10 件の結果。<br>環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04</p>
+<p class="page-desc">main へのプッシュごとに実行。最新 10 件の結果。<br>環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04<br>2026-10-18 からこのマシンはメンテナンス中のため、ベンチマークは GitHub Actions で実行しています。この日以降の数値はそれ以前と変わることがあります。</p>
 
 <ClientOnly>
 <div v-if="loading">読み込み中...</div>

@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -40,10 +41,17 @@ class SettingsRepository @Inject constructor(
         val REORDER_ENABLED = booleanPreferencesKey("reorder_enabled")
         val REORDER_PROFILE = stringPreferencesKey("reorder_profile")
         val REORDER_PORTS = stringPreferencesKey("reorder_ports")
+        val REDUNDANT_ENABLED = booleanPreferencesKey("redundant_enabled")
+        val REDUNDANT_PORTS = stringPreferencesKey("redundant_ports")
         val HYBRID_ENABLED = booleanPreferencesKey("hybrid_enabled")
         val HYBRID_TCP_MODE = stringPreferencesKey("hybrid_tcp_mode")
         val BLUETOOTH_PATH_ENABLED = booleanPreferencesKey("bluetooth_path_enabled")
+        val PATH_WIFI = booleanPreferencesKey("path_wifi")
+        val PATH_CELLULAR = booleanPreferencesKey("path_cellular")
+        val PATH_ETHERNET = booleanPreferencesKey("path_ethernet")
+        val AUTO_RECONNECT = booleanPreferencesKey("auto_reconnect")
         val SCHEDULER = stringPreferencesKey("scheduler")
+        val BACKUP_PATHS = stringSetPreferencesKey("backup_paths")
         val SCHEMA = intPreferencesKey("settings_schema_version")
     }
 
@@ -88,10 +96,17 @@ class SettingsRepository @Inject constructor(
                 reorderEnabled = prefs[Keys.REORDER_ENABLED] ?: defaults.reorderEnabled,
                 reorderProfile = prefs[Keys.REORDER_PROFILE] ?: defaults.reorderProfile,
                 reorderPorts = prefs[Keys.REORDER_PORTS] ?: defaults.reorderPorts,
+                redundantEnabled = prefs[Keys.REDUNDANT_ENABLED] ?: defaults.redundantEnabled,
+                redundantPorts = prefs[Keys.REDUNDANT_PORTS] ?: defaults.redundantPorts,
                 hybridEnabled = prefs[Keys.HYBRID_ENABLED] ?: defaults.hybridEnabled,
                 hybridTcpMode = prefs[Keys.HYBRID_TCP_MODE] ?: defaults.hybridTcpMode,
                 bluetoothPathEnabled = prefs[Keys.BLUETOOTH_PATH_ENABLED] ?: defaults.bluetoothPathEnabled,
+                pathWifi = prefs[Keys.PATH_WIFI] ?: defaults.pathWifi,
+                pathCellular = prefs[Keys.PATH_CELLULAR] ?: defaults.pathCellular,
+                pathEthernet = prefs[Keys.PATH_ETHERNET] ?: defaults.pathEthernet,
+                autoReconnect = prefs[Keys.AUTO_RECONNECT] ?: defaults.autoReconnect,
                 scheduler = prefs[Keys.SCHEDULER] ?: defaults.scheduler,
+                backupPaths = prefs[Keys.BACKUP_PATHS] ?: defaults.backupPaths,
             )
         }
 
@@ -106,10 +121,17 @@ class SettingsRepository @Inject constructor(
             prefs[Keys.REORDER_ENABLED] = newSettings.reorderEnabled
             prefs[Keys.REORDER_PROFILE] = newSettings.reorderProfile
             prefs[Keys.REORDER_PORTS] = newSettings.reorderPorts
+            prefs[Keys.REDUNDANT_ENABLED] = newSettings.redundantEnabled
+            prefs[Keys.REDUNDANT_PORTS] = newSettings.redundantPorts
             prefs[Keys.HYBRID_ENABLED] = newSettings.hybridEnabled
             prefs[Keys.HYBRID_TCP_MODE] = newSettings.hybridTcpMode
             prefs[Keys.BLUETOOTH_PATH_ENABLED] = newSettings.bluetoothPathEnabled
+            prefs[Keys.PATH_WIFI] = newSettings.pathWifi
+            prefs[Keys.PATH_CELLULAR] = newSettings.pathCellular
+            prefs[Keys.PATH_ETHERNET] = newSettings.pathEthernet
+            prefs[Keys.AUTO_RECONNECT] = newSettings.autoReconnect
             prefs[Keys.SCHEDULER] = newSettings.scheduler
+            prefs[Keys.BACKUP_PATHS] = newSettings.backupPaths
         }
     }
 }

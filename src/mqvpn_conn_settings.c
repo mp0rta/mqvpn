@@ -40,6 +40,13 @@ mqvpn_apply_scheduler(xqc_conn_settings_t *cs, mqvpn_scheduler_t sched)
     switch (sched) {
     case MQVPN_SCHED_WLB:
     case MQVPN_SCHED_WLB_UDP_PIN: cs->scheduler_callback = xqc_wlb_scheduler_cb; break;
+    case MQVPN_SCHED_FAILOVER:
+        /* xquic's backup scheduler: a STANDBY path is used only when no
+         * AVAILABLE path is usable. STANDBY paths are not probed
+         * (standby_path_probe_timeout stays 0): a PING every second keeps a
+         * cellular radio awake, and failing over is as fast without it. */
+        cs->scheduler_callback = xqc_backup_scheduler_cb;
+        break;
     case MQVPN_SCHED_BACKUP_FEC:
 #if defined(XQC_ENABLE_FEC) && defined(XQC_ENABLE_XOR)
         cs->scheduler_callback = xqc_backup_fec_scheduler_cb;
@@ -107,11 +114,17 @@ mqvpn_apply_reinjection(const mqvpn_conn_settings_input_t *in, xqc_conn_settings
             cs->reinj_deadline_lower_bound = cs->reinj_hard_deadline;
         }
         break;
-    case MQVPN_REINJ_DGRAM:
-        cs->reinj_ctl_callback = xqc_dgram_reinj_ctl_cb;
-        cs->mp_enable_reinjection = XQC_REINJ_UNACK_AFTER_SEND;
-        break;
     }
+}
+
+uint64_t
+mqvpn_tcp_stream_recv_rate(uint64_t conn_recv_rate)
+{
+    if (conn_recv_rate == 0) return 0;
+    /* max(1, ...): a rate of 0 means "no rate" and would give the stream a
+     * 16 MiB window. */
+    uint64_t r = conn_recv_rate / 4;
+    return r ? r : 1;
 }
 
 void
@@ -123,7 +136,28 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     out->max_datagram_frame_size = 65535;
     out->proto_version = XQC_VERSION_V1;
     out->pacing_on = 1;
-    out->max_pkt_out_size = MQVPN_MAX_PKT_OUT_SIZE;
+    out->max_pkt_out_size = mqvpn_pkt_out_size(in->path_mtu);
+    /* Advertise what a smaller PathMTU can receive (max_udp_payload_size),
+     * so a server with a bigger one sizes its packets for this client: xquic
+     * caps a server's packets to it minus the ACK and tag room, which gives
+     * back the size this side sends. At the cap the default (1500) is kept. */
+    if (in->path_mtu > 0 && out->max_pkt_out_size < MQVPN_XQC_MAX_PKT_OUT_SIZE)
+        out->max_udp_payload_size = out->max_pkt_out_size + MQVPN_PKT_OUT_OVERHEAD;
+    /* PMTUD: start at the smallest size that still gives an IPv6 inner MTU
+     * of 1280, with the reorder header when reorder may be negotiated, and
+     * let xquic grow it while its probes are acknowledged, up to the PathMTU
+     * size, or the xquic cap when no PathMTU is set. It is also the size
+     * xquic goes back to when a path shrinks. */
+    if (in->pmtud) {
+        size_t cap =
+            in->path_mtu > 0 ? out->max_pkt_out_size : MQVPN_XQC_MAX_PKT_OUT_SIZE;
+        size_t base =
+            MQVPN_PMTUD_BASE_PKT_OUT_SIZE + (in->reorder ? MQVPN_REORDER_HDR_LEN : 0);
+
+        out->enable_pmtud = 0x3;
+        out->probing_pkt_out_size = cap;
+        if (out->max_pkt_out_size > base) out->max_pkt_out_size = base;
+    }
     out->sndq_packets_used_max = XQC_SNDQ_MAX_PKTS;
     out->so_sndbuf = 8 * 1024 * 1024;
     out->idle_time_out = 120000;
@@ -148,10 +182,8 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
      * upload over a 1.5 Gbit/s internet path lost 5-10% (ping 70-120 ms
      * down to ~18 ms); download there was within its run-to-run spread.
      * 256 cut the ping further but lost 13-46% of the shaped throughput.
-     * Suspected, not yet confirmed: with a short queue the send list empties
-     * into the per-path buffers, and xqc_sample_check_app_limited (see its
-     * multipath FIXME) then marks a path with an empty buffer app-limited,
-     * so BBR stops raising its bandwidth estimate. */
+     * These were measured before mp0rta/xquic#85 changed how a multipath
+     * path is marked app-limited, and have not been re-measured since. */
     out->max_stream_unsent_packets = MQVPN_STREAM_UNSENT_PACKETS;
 
     /* Caller-gated, never derived here: see the field comment in
@@ -173,7 +205,12 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     if (cc == MQVPN_CC_NONE) cc = MQVPN_CC_BBR2;
 #endif
     switch (cc) {
-    case MQVPN_CC_BBR: out->cong_ctrl_callback = xqc_bbr_cb; break;
+    case MQVPN_CC_BBR:
+        out->cong_ctrl_callback = xqc_bbr_cb;
+        /* Without it, a link whose RTT swings past twice its min_rtt is held
+         * below its rate by a cwnd sized for min_rtt. */
+        out->cc_params.cc_optimization_flags = XQC_BBR_FLAG_RTTVAR_COMPENSATION;
+        break;
     case MQVPN_CC_CUBIC: out->cong_ctrl_callback = xqc_cubic_cb; break;
     case MQVPN_CC_NONE:
 #ifdef XQC_ENABLE_UNLIMITED
@@ -185,11 +222,15 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     case MQVPN_CC_BBR2:
         out->cong_ctrl_callback = xqc_bbr2_cb;
         out->cc_params.cc_optimization_flags =
-            XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+            (in->disable_bbr2_rttvar_compensation ? 0
+                                                  : XQC_BBR2_FLAG_RTTVAR_COMPENSATION) |
+            (in->disable_bbr2_fast_convergence ? 0 : XQC_BBR2_FLAG_FAST_CONVERGENCE);
         break;
     }
 
-    /* --- intentional client/server asymmetry (4) ---
+    out->max_body_buf_per_stream = MQVPN_STREAM_BODY_BUF_BYTES;
+
+    /* --- intentional client/server asymmetry (7) ---
      * Each branch documents why these fields differ between sides. Do not
      * collapse without revisiting tests/test_conn_settings.c
      * test_asymmetry_server_vs_client. */
@@ -210,6 +251,8 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
 
         if (in->recv_rate_bytes_per_sec) {
             out->recv_rate_bytes_per_sec = in->recv_rate_bytes_per_sec;
+            out->enable_stream_rate_limit = 1;
+            out->init_recv_window = MQVPN_STREAM_INIT_RECV_WINDOW;
         }
     }
 
@@ -226,6 +269,20 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
     }
 }
 
+xqc_log_level_t
+mqvpn_xqc_log_level(mqvpn_log_level_t level)
+{
+    /* mqvpn INFO maps to xquic WARN (DD §5): xquic INFO logs every packet,
+     * which floods slow consoles. --log-level debug gives the xquic detail. */
+    switch (level) {
+    case MQVPN_LOG_DEBUG: return XQC_LOG_DEBUG;
+    case MQVPN_LOG_INFO: return XQC_LOG_WARN;
+    case MQVPN_LOG_WARN: return XQC_LOG_WARN;
+    case MQVPN_LOG_ERROR: return XQC_LOG_ERROR;
+    default: return XQC_LOG_WARN;
+    }
+}
+
 #if defined(__linux__)
 
 /* The bundled binds accept at most 32 datagrams per send (BIND_POSIX_MAX_BATCH
@@ -238,7 +295,7 @@ int
 mqvpn_tx_batch_register(int udp_gso, xqc_send_mmsg_ex_pt cb,
                         xqc_transport_callbacks_t *tcbs, xqc_config_t *xconfig)
 {
-    /* mqvpn_tx_batch_enabled's MQVPN_MAX_PKT_OUT_SIZE <= 1500 term is a
+    /* mqvpn_tx_batch_enabled's MQVPN_XQC_MAX_PKT_OUT_SIZE <= 1500 term is a
      * compatibility guard for the Linux GSO run bound (a full burst of
      * XQC_MAX_SEND_MSG_ONCE datagrams must stay far below the ~64KB kernel
      * ceiling so the bind can skip run splitting). It is not an xquic

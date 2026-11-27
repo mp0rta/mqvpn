@@ -11,4 +11,6 @@ data class ReorderStats(
     val ackDemote: Long = 0,
     val bufferedP50Ms: Long = 0,
     val bufferedP99Ms: Long = 0,
+    /** Cumulative residence-time histogram (12 buckets) when filled by the native side. */
+    val residenceBuckets: List<Long> = emptyList(),
 )

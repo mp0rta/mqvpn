@@ -7,6 +7,7 @@ import android.util.Log
 import com.mqvpn.sdk.core.internal.ReorderPlan
 import com.mqvpn.sdk.core.internal.TunnelCallbacks
 import com.mqvpn.sdk.core.internal.planReorder
+import com.mqvpn.sdk.core.internal.planRedundant
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
@@ -56,9 +57,16 @@ class MqvpnTunnel internal constructor(
 
     // --- Path management (through the reactor) ---
 
-    /** Path handle (>= 0) or -1; on -1 the caller still owns and closes [fd]. */
-    fun addPath(fd: Int, iface: String): Long =
-        live(-1L) { NativeBridge.reactorAddPath(reactorHandle, it, fd, iface) }
+    /**
+     * Path handle (>= 0) or -1; on -1 the caller still owns and closes [fd].
+     * [backup]: a backup path, idle under the failover scheduler while a
+     * path without the flag works.
+     */
+    fun addPath(fd: Int, iface: String, backup: Boolean = false): Long = live(-1L) {
+        NativeBridge.reactorAddPath(
+            reactorHandle, it, fd, iface, if (backup) NativeBridge.PATH_FLAG_BACKUP else 0,
+        )
+    }
 
     /** Orderly removal; the caller closes the fd afterwards, then calls [pathReleased]. */
     fun removePath(pathHandle: Long): Int =
@@ -88,8 +96,7 @@ class MqvpnTunnel internal constructor(
     fun getReorderStats(): ReorderStats {
         if (!reorderEnabled) return ReorderStats()
         val a = live(null) { NativeBridge.getReorderStats(it) } ?: return ReorderStats()
-        if (a.size < REORDER_STATS_FIELDS) return ReorderStats()
-        return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+        return decodeReorderStats(a)
     }
 
     fun getStats(): VpnStats {
@@ -155,7 +162,7 @@ class MqvpnTunnel internal constructor(
 
     companion object {
         private const val TAG = "MqvpnTunnel"
-        private const val REORDER_STATS_FIELDS = 7
+        internal const val REORDER_STATS_FIELDS = 19
         const val ERR_AGAIN = -9
         /** MQVPN_ERR_INVALID_STATE: also what every call returns after [destroy]. */
         const val ERR_INVALID_STATE = -13
@@ -171,12 +178,29 @@ class MqvpnTunnel internal constructor(
             }
         }
 
+        /** Null when disabled. A failure is logged and the tunnel continues with redundant off. */
+        internal fun applyRedundant(
+            cfg: Long,
+            config: MqvpnConfig,
+            set: (Long, Boolean, IntArray) -> Int = NativeBridge::configSetRedundant,
+        ): Int? {
+            val plan = planRedundant(config) ?: return null
+            val rc = set(cfg, true, plan.ports)
+            if (rc != 0) Log.w(TAG, "configSetRedundant failed (rc=$rc)")
+            return rc
+        }
+
         /** [reactorHandle]: the executor's NativeReactorWaiter.reactorHandle. */
         internal fun create(config: MqvpnConfig, callbacks: TunnelCallbacks, reactorHandle: Long): MqvpnTunnel {
             // Also guards startTunnel callers that bypass MqvpnManager.connect() (restored-config
             // path); note the service executor only logs a throw here.
             config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
             require(reactorHandle != 0L) { "reactor handle required" }
+            // the native setter refuses anything else, and a tunnel with the
+            // default size instead would not be what was asked for
+            require(config.pathMtu == 0 || config.pathMtu in 1280..9000) {
+                "pathMtu must be 0 or 1280-9000, not ${config.pathMtu}"
+            }
             val cfg = NativeBridge.configNew()
             NativeBridge.configSetServer(cfg, config.serverAddress, config.serverPort)
             config.tlsServerName?.let { NativeBridge.configSetTlsServerName(cfg, it) }
@@ -184,15 +208,19 @@ class MqvpnTunnel internal constructor(
             NativeBridge.configSetInsecure(cfg, config.insecure)
             NativeBridge.configSetScheduler(cfg, config.scheduler.native)
             NativeBridge.configSetRequestServerScheduler(cfg, config.requestServerScheduler)
+            NativeBridge.configSetCc(cfg, config.cc.native)
             NativeBridge.configSetLogLevel(cfg, config.logLevel.native)
             NativeBridge.configSetMultipath(cfg, config.multipathEnabled)
             NativeBridge.configSetReconnect(cfg, config.reconnect, config.reconnectIntervalSec)
             NativeBridge.configSetKillswitchHint(cfg, config.killSwitch)
+            NativeBridge.configSetPathMtu(cfg, config.pathMtu)
+            NativeBridge.configSetPmtud(cfg, config.pmtud)
             NativeBridge.configSetHybridEnabled(cfg, config.hybridEnabled)
             NativeBridge.configSetHybridTcpMode(cfg, config.hybridTcpMode.native)
             NativeBridge.configSetAndroidClock(cfg)
             val plan = planReorder(config)
             applyReorder(cfg, plan)
+            applyRedundant(cfg, config)
             val handle = NativeBridge.clientNew(cfg, callbacks)
             if (handle == 0L) {
                 NativeBridge.configFree(cfg) // the config is ours until a client owns a copy
@@ -201,4 +229,10 @@ class MqvpnTunnel internal constructor(
             return MqvpnTunnel(handle, cfg, reactorHandle, plan.enabled)
         }
     }
+}
+
+/** Native layout: 0-6 counters and percentiles, 7-18 residence_bucket[0..11]. */
+internal fun decodeReorderStats(a: LongArray): ReorderStats {
+    if (a.size < MqvpnTunnel.REORDER_STATS_FIELDS) return ReorderStats()
+    return ReorderStats(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a.copyOfRange(7, 19).toList())
 }

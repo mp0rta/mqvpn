@@ -249,12 +249,18 @@ test_tcp_close_hook(struct tcp_pcb *pcb)
 
 static int g_h3_close_calls;
 static void *g_h3_close_last_req;
+/* When set, the close runs the closing notify inline, as xquic does for a
+ * request whose transport stream has already closed. */
+static mqvpn_tcp_lane_t *g_h3_close_reenter_lane;
+static void *g_h3_close_reenter_stream;
 
 void
 cli_tcp_lane_h3_close(void *h3_request)
 {
     g_h3_close_calls++;
     g_h3_close_last_req = h3_request;
+    if (g_h3_close_reenter_lane)
+        mqvpn_tcp_lane_on_h3_closing(g_h3_close_reenter_lane, g_h3_close_reenter_stream);
 }
 
 /* ─── cli_tcp_lane_h3_recv test double (real impl: mqvpn_client.c) ───
@@ -481,6 +487,8 @@ relay_reset(void)
     g_tcp_close_last_pcb = NULL;
     g_h3_close_calls = 0;
     g_h3_close_last_req = NULL;
+    g_h3_close_reenter_lane = NULL;
+    g_h3_close_reenter_stream = NULL;
     g_open_stream_fail = 0;
 }
 
@@ -2834,6 +2842,47 @@ test_h3_closing_notify_teardown(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* The H3 close may run the closing notify inline (xquic does when the
+ * transport stream has already closed). The flow must be removed exactly
+ * once; under ASan a use-after-free or double free fails this test. */
+static void
+test_h3_close_runs_closing_notify_inline(void)
+{
+    relay_reset();
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0xe003ULL, NULL, fake_clock, NULL);
+    struct tcp_pcb pcb1, pcb2;
+    int req1, req2;
+    /* Static so g_h3_close_reenter_stream never holds a stack address. */
+    static int stream1, stream2;
+
+    /* lwIP error path: close_h3, then remove_flow. */
+    mqvpn_tcp_flow_t *f = setup_flow(lane, &pcb1, 8300, &req1, &stream1, 1);
+    ASSERT_TRUE(f != NULL, "flow 1 established");
+    g_h3_close_reenter_lane = lane;
+    g_h3_close_reenter_stream = &stream1;
+    mqvpn_tcp_lane_on_lwip_err(f, ERR_RST);
+    mqvpn_flow_key_t k1 = mk_std_key(8300);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k1, NULL, NULL), 0, "flow 1 removed");
+    ASSERT_EQ_INT(g_h3_close_calls, 1, "flow 1 request closed once");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 0, "lwIP already freed pcb 1");
+
+    /* Relay-error path: close_h3, then abort the pcb, then remove_flow. */
+    f = setup_flow(lane, &pcb2, 8301, &req2, &stream2, 1);
+    ASSERT_TRUE(f != NULL, "flow 2 established");
+    g_h3_close_reenter_stream = &stream2;
+    (void)mqvpn_tcp_lane_on_relay_error(f);
+    mqvpn_flow_key_t k2 = mk_std_key(8301);
+    ASSERT_EQ_INT(mqvpn_tcp_lane_lookup(lane, &k2, NULL, NULL), 0, "flow 2 removed");
+    ASSERT_EQ_INT(g_h3_close_calls, 2, "flow 2 request closed once");
+    ASSERT_EQ_INT(g_tcp_abort_calls, 1, "pcb 2 aborted once");
+    ASSERT_TRUE(g_tcp_abort_last_pcb == &pcb2, "the right pcb was aborted");
+
+    g_h3_close_reenter_lane = NULL;
+    mqvpn_tcp_lane_free(lane);
+}
+
 static void
 test_abort_pending_real(void)
 {
@@ -2868,8 +2917,8 @@ test_abort_pending_real(void)
     ASSERT_EQ_INT(g_h3_close_calls, 0, "abort_pending never closes H3 (none existed)");
 
     /* Case 2: abort AFTER bind — a request DOES exist (the send-headers-
-     * failure shape: the caller already closed it itself before calling
-     * abort_pending). abort_pending must still not close it again. */
+     * failure shape: the caller closes it itself after abort_pending).
+     * abort_pending must not close it. */
     mqvpn_flow_key_t key2 = mk_std_key(8301);
     ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key2, 1, 0), 0, "flow2 SYN-time commit");
     struct tcp_pcb pcb2;
@@ -3702,6 +3751,76 @@ test_idle_eviction_sweep_cadence_gate(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* find_flow_by_stream walks lane->bound_head, not the table: the list must
+ * hold exactly the flows that have a stream, through binds and both teardown
+ * flavours, with consistent back links. */
+static int
+bound_list_ok(mqvpn_tcp_lane_t *lane, int *n_out)
+{
+    int n = 0, in_table = 0;
+    mqvpn_tcp_flow_t *prev = NULL;
+    for (mqvpn_tcp_flow_t *f = lane->bound_head; f; f = f->bound_next) {
+        if (f->bound_prev != prev || f->stream == NULL) return 0;
+        prev = f;
+        n++;
+    }
+    for (uint32_t i = 0; i < lane->n_buckets; i++)
+        for (mqvpn_tcp_flow_t *f = lane->buckets[i]; f; f = f->next)
+            if (f->stream) in_table++;
+    *n_out = n;
+    return n == in_table;
+}
+
+static void
+test_bound_list_tracks_streams(void)
+{
+    mqvpn_hybrid_config_t cfg;
+    mqvpn_hybrid_config_default(&cfg);
+    cfg.enabled = 1;
+    cfg.tcp_mode = MQVPN_HYBRID_TCP_STREAM;
+    mqvpn_tcp_lane_t *lane = mqvpn_tcp_lane_new(&cfg, 0x6161ULL, NULL, NULL, NULL);
+    ASSERT_TRUE(lane != NULL, "lane_new succeeds");
+
+    enum { N = 6 };
+    struct tcp_pcb pcbs[N];
+    int reqs[N], streams[N];
+    mqvpn_tcp_flow_t *flows[N];
+    int n = -1;
+    for (int i = 0; i < N; i++) {
+        flows[i] =
+            setup_flow(lane, &pcbs[i], (uint16_t)(5100 + i), &reqs[i], &streams[i], 0);
+        ASSERT_TRUE(flows[i] != NULL, "flow set up and bound");
+    }
+    ASSERT_TRUE(bound_list_ok(lane, &n) && n == N, "every bound flow is listed once");
+
+    /* Every stream reaches its own flow. */
+    for (int i = 0; i < N; i++)
+        mqvpn_tcp_lane_on_stream_established(lane, &streams[i]);
+    for (int i = 0; i < N; i++)
+        ASSERT_EQ_INT(flows[i]->state, TCP_FLOW_ACTIVE, "2xx reached the right flow");
+
+    /* Both teardown flavours unlink: the H3 side resetting (close_h3=0), at
+     * the head, middle and tail of the list, and a rejection (close_h3=1). */
+    mqvpn_tcp_lane_on_h3_closing(lane, &streams[N - 1]); /* list head */
+    mqvpn_tcp_lane_on_h3_closing(lane, &streams[2]);
+    mqvpn_tcp_lane_on_h3_closing(lane, &streams[0]); /* list tail */
+    ASSERT_TRUE(bound_list_ok(lane, &n) && n == N - 3, "torn-down flows unlinked");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_h3_writable(lane, &streams[2]), 0,
+                  "a torn-down flow's stream finds nothing");
+
+    int req_x, stream_x;
+    struct tcp_pcb pcb_x;
+    mqvpn_tcp_flow_t *fx = setup_flow(lane, &pcb_x, 5200, &req_x, &stream_x, 0);
+    ASSERT_TRUE(fx != NULL && bound_list_ok(lane, &n) && n == N - 2, "re-grown list");
+    mqvpn_tcp_lane_on_stream_rejected(lane, &stream_x);
+    ASSERT_TRUE(bound_list_ok(lane, &n) && n == N - 3, "rejected flow unlinked");
+    for (int i = 1; i < N - 1; i++) {
+        if (i == 2) continue;
+        flows[i]->pcb = NULL; /* stack-fake pcbs: keep lane_free off them */
+    }
+    mqvpn_tcp_lane_free(lane);
+}
+
 int
 main(void)
 {
@@ -3715,6 +3834,7 @@ main(void)
     test_markers_dont_consume_tcp_budget();
     test_marker_cap();
     test_accept_key_correspondence();
+    test_bound_list_tracks_streams();
     test_relay_full_accept();
     test_relay_eagain_then_writable_flush();
     test_relay_partial_accept();
@@ -3745,6 +3865,7 @@ main(void)
     test_connect_path_format_truncation();
     test_lwip_err_teardown();
     test_h3_closing_notify_teardown();
+    test_h3_close_runs_closing_notify_inline();
     test_abort_pending_real();
     test_accept_open_stream_fail_returns_abrt();
     test_lwip_sent_teardown_returns_abrt();

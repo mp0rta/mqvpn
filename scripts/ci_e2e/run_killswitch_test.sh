@@ -240,7 +240,7 @@ if kill -0 "$CLIENT_PID" 2>/dev/null; then
     wait "$CLIENT_PID" 2>/dev/null || true
     CLIENT_PID=""
 else
-    wait "$CLIENT_PID" 2>/dev/null || true
+    check_closed_exit "$CLIENT_PID" "client" "${WORK_DIR}/client.log" || exit 1
     CLIENT_PID=""
     echo "Client exited (--no-reconnect mode, expected)"
     echo "=== Test 3 (Client exit): PASS ==="

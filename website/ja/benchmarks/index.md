@@ -20,7 +20,7 @@ const latestAggregate = computed(() => {
 
 # ベンチマーク
 
-<p class="page-desc">CI による自動ベンチマーク結果です。<br>環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04</p>
+<p class="page-desc">CI による自動ベンチマーク結果です。<br>環境: Proxmox VM, i9-13900H, 4 vCPU（ピニング）, Ubuntu 24.04<br>2026-10-18 からこのマシンはメンテナンス中のため、ベンチマークは GitHub Actions で実行しています。この日以降の数値はそれ以前と変わることがあります。</p>
 
 ## コミットごとの結果
 

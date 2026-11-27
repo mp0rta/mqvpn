@@ -2,6 +2,13 @@
 
 mqvpn は INI と JSON の両方の設定ファイルに対応しています。ファイルの内容が `{` で始まる場合は JSON、それ以外は INI として解析されます。CLI 引数は設定ファイルの値を上書きします。
 
+BOM の有無にかかわらず UTF-8 ファイルと Windows の改行（CRLF）に対応します。
+NUL バイトを含むファイルはエラーになります。INI のセクション名とキー名は
+大文字・小文字を区別しません。壊れたセクション見出しには警告を出し、
+次の有効なセクション見出しまで、その下のキーを無視します。オン・オフを指定するキーには
+`true` か `false` を書きます（大文字・小文字は区別しません。JSON では引用符なしの
+`true`/`false`）。`on`・`yes`・`1` など、それ以外の値はエラーになり mqvpn は起動しません。
+
 ## INI 形式
 
 ### サーバー
@@ -25,13 +32,15 @@ User = bob:<BOB_PSK>
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+AllowClientScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 
 [Hybrid]
 Enabled = true
 
 [Reorder]
-Enabled = on
+Enabled = true
 ```
 
 CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) にはサーバー証明書と中間証明書を連結した fullchain を指定します。Let's Encrypt では `cert.pem` ではなく `fullchain.pem` です。クライアントはサーバーが送った chain をそのまま検証し、足りない中間証明書を取りに行かないため、leaf だけのファイルでは、その中間証明書を元から信頼していないクライアントで検証に失敗します。
@@ -42,7 +51,8 @@ CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) �
 # /etc/mqvpn/client.conf
 [Server]
 Address = 203.0.113.1:443
-# ServerName = vpn.example.com  # TLS SNI / 証明書検証名（デフォルト: Address のホスト部）
+# TLS SNI / 証明書検証名（デフォルト: Address のホスト部）
+# ServerName = vpn.example.com
 
 [Auth]
 Key = mPyVpoQWcp/5gr404xvS19aRC03o0XS2mrb2tZJ1Ii4=
@@ -55,7 +65,11 @@ LogLevel = info
 
 [Multipath]
 Scheduler = wlb
-# CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+# このクライアントのダウンロード方向では、サーバーのスケジューラを上の Scheduler で上書きする
+# (サーバー側で AllowClientScheduler = true が必要):
+# RequestServerScheduler = true
+# Congestion control (bbr2|bbr|cubic|none)
+# CC = bbr2
 Path = eth0
 Path = wlan0
 
@@ -63,12 +77,13 @@ Path = wlan0
 # Enabled = true
 
 # [Reorder]                     # 内側 QUIC などの大きな転送向け。詳細は [Reorder] の節
-# Enabled = on
+# Enabled = true
 ```
 
 ## JSON 形式
 
 JSON は構造化された設定管理や自動化ツールとの連携に便利です。
+ファイルは厳密な JSON (RFC 8259) で書きます。コメントや末尾のカンマは使えず、キーと文字列は二重引用符で囲みます。
 
 ### サーバー
 
@@ -89,9 +104,10 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   ],
   "max_clients": 64,
   "scheduler": "wlb",
+  "allow_client_scheduler": true,
   "cc": "bbr2",
   "hybrid": { "enabled": true },
-  "reorder": { "enabled": "on" }
+  "reorder": { "enabled": true }
 }
 ```
 
@@ -118,13 +134,18 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 }
 ```
 
+上の例にない `[Interface]` と `[Multipath]` のキーも、JSON では最上位に書きます。JSON での名前は `mtu` (`MTU`)、`path_mtu` (`PathMTU`)、`pmtud` (`PMTUD`)、`manage_routes` (`ManageRoutes`)、`init_max_path_id` (`InitMaxPathId`)、`bbr2_fast_convergence` (`Bbr2FastConvergence`)、`bbr2_rttvar_compensation` (`Bbr2RttvarCompensation`)、`reinjection` (`Reinjection`)、`reinjection_srtt_factor_pct` (`ReinjectionSrttFactorPct`)、`reinjection_hard_deadline_ms` (`ReinjectionHardDeadlineMs`)、`reinjection_deadline_lower_bound_ms` (`ReinjectionDeadlineLowerBoundMs`)、`redundant` (`Redundant`)、`redundant_ports` (`RedundantPorts`) です。
+
 ## マルチユーザー認証
 
 サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config では `users` 配列で設定します。各要素はオブジェクト形式（`{"name":"alice","key":"..."}`）または省略形の文字列（`"alice:key"`）のどちらでも指定可能です。INI config では `[Auth]` セクションに `User = NAME:KEY` 行を複数書きます。[Control API](#control-api) を使って実行中にユーザーを管理することもできます。
 
+設定のユーザー名は最大63バイトです。長い名前は切り詰めずに拒否します。
+INI では警告を出してそのエントリを無視し、JSON と `--user` ではエラーになります。
+
 `auth_key`（グローバルキー）と `users` を両方設定した場合、クライアントはどちらでも認証可能です。名前付きユーザーのみに制限するには、`auth_key` を設定から削除してください。
 
-ユーザーに毎回同じ VPN アドレスを割り当てるには、アドレスを追加します。INI では `User = alice:KEY:10.0.0.10`、JSON ではユーザーのオブジェクトに `"ip": "10.0.0.10"` を書くか、文字列 `"alice:KEY:10.0.0.10"` を使います。コマンドラインでは `--user alice:KEY:10.0.0.10` です。アドレスは `Subnet` の範囲内で、サーバー自身のアドレス（先頭の 1 つ）以外にしてください。同じアドレスを 2 人に割り当てることはできません。このアドレスは、そのユーザーがオフラインの間も他の誰にも割り当てられません。同じユーザーが古い接続を残したまま再接続した場合は、新しい接続がアドレスを受け取り、古い接続は切断されます。そのユーザーに IPv6 アドレスもある場合は、そちらも変わりません。固定アドレスが `Subnet` 内の有効なアドレスでない場合、サーバー自身のアドレスである場合、または 2 人に割り当てられている場合、サーバーは起動しません。固定アドレスは、一度に 1 台の端末から接続するユーザーに割り当ててください。同じユーザーを 2 台の端末で使うと、お互いのアドレスを奪い合います。v0.18.0 で追加されました。
+ユーザーに毎回同じ VPN アドレスを割り当てるには、アドレスを追加します。INI では `User = alice:KEY:10.0.0.10`、JSON ではユーザーのオブジェクトに `"ip": "10.0.0.10"` を書くか、文字列 `"alice:KEY:10.0.0.10"` を使います。コマンドラインでは `--user alice:KEY:10.0.0.10` です。アドレスは `Subnet` の範囲内で、サーバー自身のアドレス（先頭の 1 つ）以外にしてください。同じアドレスを 2 人に割り当てることはできません。このアドレスは、そのユーザーがオフラインの間も他の誰にも割り当てられません。同じユーザーが古い接続を残したまま再接続した場合は、新しい接続がアドレスを受け取り、古い接続は切断されます。そのユーザーに IPv6 アドレスもある場合は、そちらも変わりません。固定アドレスが `Subnet` 内の有効なアドレスでない場合、サーバー自身のアドレスである場合、または 2 人に割り当てられている場合、サーバーは起動しません。固定アドレスは、一度に 1 台の端末から接続するユーザーに割り当ててください。同じユーザーを 2 台の端末で使うと、お互いのアドレスを奪い合います。v0.21.0 で追加されました。
 
 Control API でユーザーを削除すると、そのユーザー名で認証された接続中のセッションも切断されます。
 
@@ -155,7 +176,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |------|------|-----------|
 | `Listen` | リッスンアドレス（サーバーのみ） | `0.0.0.0:443` |
 | `Subnet` | クライアント IPv4 プール（サーバーのみ） | `10.0.0.0/24` |
-| `Subnet6` | クライアント IPv6 プール（サーバーのみ） | — |
+| `Subnet6` | クライアント IPv6 プール（サーバーのみ）。各クライアントには `Subnet` と同じ位置のアドレスが割り当てられるため、同じ数のアドレスを収容できる必要がある（`/24` ならプレフィックス長 `/120` 以下） | — |
 | `TunName` | TUN デバイス名 | `mqvpn0` |
 | `DNS` | DNS サーバー（カンマ区切り） | — |
 | `LogLevel` | ログレベル（`debug`、`info`、`warn`、`error`） | `info` |
@@ -164,6 +185,8 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `ReconnectInterval` | 再接続の間隔（秒） | `5` |
 | `ManageRoutes` | ホストのルーティングテーブルを管理する（VPN ルートとサーバー pin ルート）。自前でルーティングを管理する場合は `false`（または `--no-manage-routes`）を指定。経路の設定だけでは、ソケットを特定のアダプタに bind するアプリケーションは止められない — 下の注記を参照 | `true` |
 | `MTU` | TUN MTU（1280–9000）。クライアント: 上限指定 — ネゴシエーション値のほうが小さい場合はそちらが使われる。サーバー: TUN MTU を直接設定。 | auto（クライアント ~1382 ネゴシエーション、サーバー 1382） |
+| `PathMTU` | クライアントとサーバー間のネットワークがフラグメントなしで運べる最大の IP パケットサイズ（1280–9000）。mqvpn はこれに収まるように QUIC パケットのサイズを決める。IPv6 ヘッダを前提に計算するので IPv4 でも安全。1500 未満の値は相手にも伝わるため、クライアントの小さい値はサーバーから届くパケットのサイズも制限する。[より大きなトンネル MTU を使う](#using-a-larger-tunnel-mtu) を参照 | `0`（1400 バイトのパケット） |
+| `PMTUD` | 固定サイズに頼らず経路 MTU を探索する。パケットは小さいサイズから始まり、より大きなプローブが届く間は大きくしていく。`PathMTU` を設定した場合はそれが上限になる。両端で有効にする必要がある。[経路 MTU の探索](#discovering-the-path-mtu) を参照 | `false` |
 
 > **注記: 経路管理はアダプタに bind するアプリケーションをカバーしない**
 >
@@ -192,16 +215,21 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, `wlb_udp_pin`, または `backup_fec`） | `wlb` |
+| `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, `wlb_udp_pin`, `failover`, または `backup_fec`） | `wlb` |
 | `AllowClientScheduler` | サーバーのみ (JSON では `allow_client_scheduler`、コマンドラインでは `--allow-client-scheduler`)。`true` にすると、スケジューラを指定してきたクライアントには、そのクライアント自身の接続のダウンロード方向でそのスケジューラを使います。ほかのクライアントはサーバーの `Scheduler` のままです。クライアントが `backup_fec` を指定した場合、サーバーの `Scheduler` が `backup_fec` の場合、同じ接続ですでに一度スケジューラを変更した場合、接続がすでに複数のパスを使っている場合は、リクエストは適用されず、その接続は現在のスケジューラ（最初はサーバーの `Scheduler`）のままです。 | `false` |
 | `RequestServerScheduler` | クライアントのみ (JSON では `request_server_scheduler`、コマンドラインでは `--request-server-scheduler`)。`true` にすると、このクライアントの `Scheduler` をダウンロード方向にも使うようサーバーに依頼します。`Scheduler` だけを設定した場合は、従来どおりアップロード方向にのみ影響します。`AllowClientScheduler = true` のサーバーでのみ有効です。 | `false` |
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
-| `InitMaxPathId` | MP-QUIC draft-21 テスト用ノブ: transport parameters で広告する初期 Maximum Path Identifier（`1`–`4294967295`、`0` = xquic デフォルト `8`） | `0` |
-| `Reinjection` | 投機的複製モード（`off`, `deadline`, `idle`, または `dgram`） | `off` |
+| `BackupPath` | クライアントのみ (JSON では `backup_paths`、コマンドラインでは `--backup-path`)。`Path` と同じですが、バックアップパスになります。`Scheduler = failover` では、どの `Path` も使えないときだけトラフィックを運びます。`BackupPath` がない場合は、最初のパス以外がすべてバックアップです。[フェイルオーバー](./multipath#failover)を参照してください。 | なし |
+| `InitMaxPathId` | 接続を通して使えるパス ID の初期数（番号は 0〜N。パスを作るたびに、作り直しも含めて新しい番号を使う。足りなくなるとサーバーが 128 まで追加する）。`1`–`128`。未設定（`0`）なら `8` | `0` |
+| `Bbr2FastConvergence` | `CC = bbr2` のとき、xquic の BBRv2 高速収束拡張を有効にします。往復時間が 1 往復ごとに 4 分の 1 を超えて増えると帯域の推定値を早めに下げられるようにし、帯域の探索を 2〜3 秒ごとではなく 5〜8 往復ごとに行います。`false` にすると標準の BBRv2 の動作になります。`CC` がほかの値のときは無視されます。 | `true` |
+| `Bbr2RttvarCompensation` | `CC = bbr2` のとき、往復時間がばらつく間は、送信済みで確認応答をまだ受け取っていないデータをより多く許す xquic の BBRv2 拡張を有効にします。`false` にすると標準の BBRv2 の上限になります。`CC` がほかの値のときは無視されます。 | `true` |
+| `Reinjection` | 投機的複製モード（`off`, `deadline`, または `idle`）。`dgram` は廃止されました。設定ファイルで指定すると警告が出て `off` で動作します。パケットを複製するには冗長モード（`Redundant = true`）を使ってください。 | `off` |
 | `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` モード: 複製デッドラインの上限クランプ（`1`–`60000`） | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` モード: 下限クランプ。上限を超える値は上限に切り詰め（`1`–`60000`） | `20` |
+| `Redundant` | クライアント専用。`true` にすると、送信する UDP パケットのコピーを複数の回線で同時に送り、1 本の回線が切れてもライブ配信などが途切れにくくなります。そのトラフィックのデータ使用量は、2 本なら最大 2 倍、3 本なら最大 3 倍です。どの回線もそのトラフィックを単独で運べる速度があることを推奨します。回線が足りないことが多い場合はオフにしてください。[冗長モード](./multipath#冗長モード)を参照してください。 | `false` |
+| `RedundantPorts` | クライアント専用。`Redundant = true` のとき複製する宛先ポートをカンマ区切りで指定します（最大 16 個）。空の場合はすべての UDP を複製します。`Redundant = true` のとき、不正な値を指定するとクライアントは起動時に停止します。 | 空 |
 
 このバージョンのサーバーは、`AllowClientScheduler` が `false` の場合でも、接続中の各クライアントに、そのクライアントに対して使っているスケジューラを通知します。`RequestServerScheduler` を設定したクライアントは、接続後に `server scheduler: <name> (requested <name>)` とログに出力します。
 
@@ -216,13 +244,13 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 
 ### `[Reorder]`
 
-内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = off`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。サーバーとクライアントの両方で `Enabled = on` のときだけ有効になり、そのときクライアントのログに `peer advertised mqvpn-reorder` が出ます。
+内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = false`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。サーバーとクライアントの両方で `Enabled = true` のときだけ有効になり、そのときクライアントのログに `peer advertised mqvpn-reorder` が出ます。
 
 > **対象範囲:** reorder バッファは **内側 UDP フローのみ** に適用されます。**内側 TCP は reorder バッファでは扱いません。** 内側 TCP は代わりに、後述する hybrid mode（[`[Hybrid]`](#hybrid)）を有効化してください。QUIC stream によって reordering されます。
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `Enabled` | マスタースイッチ（`on` / `off`） | `off` |
+| `Enabled` | マスタースイッチ（`true` / `false`） | `false` |
 | `MaxWaitMs` | 欠落データグラムをスキップするまで、ギャップを保持する時間（ms） | `30` |
 | `CapPackets` | フローあたりの最大バッファデータグラム数（2 のべき乗） | `1024` |
 | `MaxBytesPerFlow` | フローあたりの最大バッファバイト数 | `1572864` |
@@ -242,7 +270,7 @@ reorder はスループットとレイテンシのトレードオフで、bulk �
 
 ```ini
 [Reorder]
-Enabled = on
+Enabled = true
 
 [ReorderRule]          # bulk な内側 QUIC: reorder 有効
 Proto = udp
@@ -260,7 +288,7 @@ JSON でも同様に設定できます。`reorder` オブジェクトは上記 I
 ```json
 {
   "reorder": {
-    "enabled": "on",
+    "enabled": true,
     "max_wait_ms": 30,
     "cap_packets": 1024,
     "max_bytes_per_flow": 1572864,
@@ -348,6 +376,11 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される。ただし RAM も見積もっておくこと: worst case は `TcpMaxGlobalFlows` × 32 KiB (4096 で約 128 MiB、全フローが両方向で一度ずつ pause した場合) |
 | 実効値の clamp | lwIP TCP pcb プールの**半分**まで (下記) | なし (lwIP を使わないため) |
 
+**受信側が読まなくなった場合:** クライアント側のアプリ、またはサーバ側の宛先が TCP 接続を読まなくなると、mqvpn は送信側を止めます。
+止まるまでに、受信側はその接続の未読データを、表の値に加えて最大で約 16 MiB 保持します。
+すべての接続がこの状態になった最悪の場合は、接続数 × 16 MiB です。
+[`RecvRateLimit`](#advanced) を設定したクライアントでは、全体で約 16 MiB に接続 1 本あたり 68 KiB を足した量までです。
+
 **client の clamp:** 実効値は lwIP TCP pcb プールの半分に制限されます。
 最大値は、desktop/router ビルド (Linux / Windows / macOS) で `4096`、Android で `256`、
 [iOS lwIP プロファイル](./hybrid-mode#ios-ビルド)で `64`になります。
@@ -366,11 +399,13 @@ JSON では `"hybrid"` オブジェクトに snake_case キーで指定します
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
-| `RecvRateLimit` | コネクションレベルの受信レート上限（バイト/秒）。QUIC の集約受信ウィンドウを `rate × RTT` に制限します。クライアント側のみ有効 — サーバは無視します（サーバ側で制限するとクライアントのアップロードを絞ってしまうため）。最大値は `10000000000`（10 GB/s）で、それを超える値は警告とともに拒否され `0` にフォールバックします。メモリ制約がある場合を除き `0` のままにしてください（モバイルクライアントは内部で設定します） | `0`（無効） |
+| `RecvRateLimit` | クライアントがメモリに保持する受信データの量を抑える設定で、レート（バイト/秒）で指定します。メモリに制約のある端末向けです（モバイルクライアントは内部で設定します）。それ以外では `0` のままにしてください。影響を受けるのは [hybrid モード](./hybrid-mode) で運ばれる TCP 接続だけで、ほかのトンネル内の通信は遅くなりません。その TCP 接続は 1 本あたり、このレートのおよそ 1/4 までになります。そのため 1 本のダウンロードはこのレートより遅くなりますが、複数の接続を合わせればレートいっぱいまで使えます。代わりに、アプリが読まなくなった接続が 3 本までなら、ほかの接続は止まりません。それより多いと、止まった接続が閉じられるかタイムアウト（`TcpIdleTimeoutSec`）するまで、hybrid モードの TCP 接続がすべて止まることがあります。クライアント側のみ有効 — サーバは無視します（サーバ側で制限するとクライアントのアップロードを絞ってしまうため）。最大値は `10000000000`（10 GB/s）で、それを超える値は警告とともに拒否され `0` にフォールバックします | `0`（無効） |
 | `UdpGso` | 高スループット時に UDP 送信をカーネル GSO でバッチ化し、CPU 使用率を下げます。非対応カーネル（4.18 未満）では通常のバッチ送信に自動的にフォールバックします。Linux / Android のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前のパケット単位の送信経路に戻ります | `true` |
 | `UdpGro` | 高スループット時に受信 UDP パケットをカーネル GRO でまとめて受け取り、CPU 使用率を下げます。非対応カーネル（5.0 未満）では 1 パケットずつの受信に自動的にフォールバックします。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前の受信経路に戻ります | `true` |
+| `TunOffload` | カーネルがトンネルインターフェースへの通信をまとめて 1 回で渡し、mqvpn 側で分割します。高スループット時の CPU 使用率を下げます。非対応カーネルでは 1 パケットずつの読み取りに自動的にフォールバックします。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前のトンネルインターフェースに戻ります | `true` |
+| `TunGro` | トンネルインターフェースへ書き込む連続した TCP パケットと、同じサイズの連続した UDP データグラムを 1 回の書き込みにまとめ、高スループット時の CPU 使用率を下げます。UDP データグラムをまとめるのはカーネル 6.2 以降のみで、それより古いカーネルでは従来どおり 1 つずつ書き込みます。`TunOffload` が `false` のときは効果がありません。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前のように 1 パケットずつ書き込みます | `true` |
 
-JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`, `udp_gso`, `udp_gro`）。
+JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`）。
 
 ## MTU ガイドライン
 
@@ -384,6 +419,8 @@ JSON では `"advanced"` オブジェクトに snake_case キーで指定しま�
 |----------|----------|
 | 標準的な Ethernet / モバイル | 設定不要（auto で約 1382） |
 | 多段トンネル構成（mqvpn → WG → 別トンネルなど） | 残りの MTU を計算し、1280 に近ければ明示指定 |
+| 両端とも 1500 バイトを問題なく通す経路で、より大きなトンネル MTU を使いたい | 両端で `PathMTU = 1500`（TUN MTU 1418） |
+| 経路 MTU が不明、または変わる（モバイル、PPPoE、トンネル、ICMP がフィルタされている） | 両端で `PMTUD = true` |
 
 クライアントでは、`MTU` を設定すると `min(設定値, ネゴシエーション値)` が実際の TUN MTU になり、設定値がネゴシエーション値を超えている場合は warning ログが出力されます。サーバーでは、`MTU` は TUN MTU をそのまま設定します（デフォルト 1382）。
 
@@ -405,6 +442,46 @@ max_pkt_out_size           1400 bytes
 ```
 
 このネゴシエーションは**クライアント**側で接続確立時に行われ、クライアントの TUN MTU はそれに追従します。**サーバー**は起動時に TUN MTU を一度だけ設定します（デフォルト 1382、または設定値）。ネゴシエーション MSS が 1382 より小さいクライアント宛の超過パケットは、サーバーがそのクライアントの MSS を MTU 値として ICMP Packet Too Big を送信元へ返します。送信元はこれを受けてパケットサイズを下げるため（Path MTU Discovery）、サーバーの TUN MTU を全クライアント共通で縮める必要はありません。
+
+### より大きなトンネル MTU を使う {#using-a-larger-tunnel-mtu}
+
+デフォルトの 1400 バイトのパケットサイズは、設定なしで PPPoE やほとんどのモバイル回線に収まります。クライアントとサーバー間のネットワークがより大きなパケットを運べると分かっている場合は、両端で `PathMTU` にそのサイズを設定すると、mqvpn はそれに収まるようにパケットサイズを決めます：
+
+```
+PathMTU                    1500 bytes
+ − IPv6 + UDP ヘッダ          48 bytes
+ − 暗号化タグ                 16 bytes
+                           ─────────
+ = max_pkt_out_size         1436 bytes（上限）
+ − QUIC、DATAGRAM、MASQUE ヘッダ  18 bytes
+                           ─────────
+ = TUN MTU                  1418 bytes
+```
+
+上限サイズのパケットには ACK フレームが載りません。上限未満では ACK フレーム用に 16 バイトの余白も確保するため、`PathMTU = 1492` ではパケットが 1412 バイト、TUN MTU が 1394 になります。QUIC ライブラリがパケットを 1436 バイトで頭打ちにするため、1500 より大きな値を指定しても結果は同じです。`PathMTU` が実際にネットワークが運べるサイズより大きいと、フルサイズのパケットがフラグメントされたり破棄されたりするので、経路が分かっている場合にだけ設定してください。
+
+1500 未満の値は、このエンドが受け取れる最大のパケットとして相手にも伝わり、相手はパケットをその範囲に収めます。そのため `PathMTU = 1500` のサーバー 1 台で、より小さい経路のクライアントにも対応できます。各クライアントが自分の `PathMTU` を設定すると、それに合ったサイズのパケットが届きます。
+
+明示した `MTU` が内側で運べるサイズを超える場合、クライアントは警告して制限します。サーバーも警告しますが、TUN MTU は指定値を維持するため、大きすぎるトンネル内パケットは破棄される場合があります。
+
+トンネル内で IPv6 を使うには、1280 バイトのパケット全体を運べる容量が必要です。IPv6 有効時、0 以外の `PathMTU` は **1378 以上**、reorder 有効時は **1386 以上**が必要です。サーバーは不足する設定での起動を拒否します。クライアントも IPv6 アドレスの割り当て時に送信可能なサイズが不足していれば、エラーを通知して接続を閉じます。`MTU = 1280` を設定しても実際の容量は増えません。IPv4 のみのトンネルでは小さい値を引き続き使用できます。デフォルトの `PathMTU = 0` も引き続き使用できます。
+
+### 経路 MTU の探索 {#discovering-the-path-mtu}
+
+両端で `PMTUD = true` にすると、mqvpn は固定サイズに頼らず、経路が運べるパケットサイズを探索します：
+
+- パケットは、内側 MTU 1280 バイト（IPv6 の最小値）を確保できる最小のサイズから始まります。経路上では IPv4 で 1358 バイト、IPv6 で 1378 バイトで、`[Reorder]` を有効にするとそのヘッダー分の 8 バイトが加わります。
+- 経路がそれより小さい場合、mqvpn は QUIC の最小パケットサイズ（1200 バイト）まで下げてそこから探索するので、IPv4 のみのトンネルは TUN MTU 1280 未満で動作し続けます。IPv6 を運ぶトンネルはそうはいかず、クライアントは IPv6 には内側 MTU 1280 が必要というエラーで接続を閉じます。
+- より大きなプローブパケットを段階的に送ります。届いたプローブはパケットサイズを引き上げ、失われたプローブは「収まらない」という意味にしかならず、接続を遅くしません。探索は試すサイズごとに数往復かかり、収まる最大サイズの 4 バイト以内で止まります。上限は `PathMTU` を設定していればそのサイズ、なければ 1436 バイト（TUN MTU 1418）です。
+- UDP ソケットは Don't Fragment ビットを立てて送信するので、途中でフラグメントされることはありません。探索に ICMP は不要で、ICMP をフィルタするネットワークでも動作します。
+- 接続中に経路が小さくなると、大きなパケットは届かなくなり、小さなパケットは届き続けます。mqvpn は現在のサイズで数個のプローブを送って確認し、それも失われた場合は数往復（100 ms の経路で約 1 秒）で開始サイズに戻り、探索をやり直します。古いサイズで送って失われたデータは、収まるパケットで再送されます。
+- 探索が上限より下で終わった場合、10 分後に経路が大きくなっていないか、上限から探索し直します。
+
+クライアントの TUN MTU は、探索したサイズに合わせて上下します。サーバーは TUN MTU を変えず、あるクライアントにとって大きすぎるパケットには、そのクライアントのサイズを載せた ICMP Packet Too Big を返します。
+
+マルチパスでは各パスを探索し、接続は最も小さいパスのサイズを使います。後から追加されたパスは開始サイズから始まるため、そのパスの探索が済むまで接続は開始サイズに戻ります。検証中のパスは数に入らないため、通らないパスがあっても接続のサイズは下がりません。
+
+PMTUD は Linux・macOS・Windows のクライアントと Linux のサーバーで動作します。Android SDK では `MqvpnConfig` に `pmtud = true`（上限には `pathMtu`）を設定します。Android は TUN MTU をトンネル確立時にしか設定できないため、1280 のままです。経路が小さくなってもトンネルは動作し続けますが、アップロードは探索した大きなサイズを使いません。
 
 ### mqvpn トンネル内で別のトンネルを使う場合
 
@@ -513,7 +590,7 @@ mqvpn --status --control-port 9090
 
 ## systemd
 
-deb パッケージや install.sh でインストール済みの場合、systemd ユニットは自動的に配置されます。ソースからビルドした場合は手動でインストールします：
+deb パッケージや install.sh でインストール済みの場合、systemd ユニットは自動的に配置されます。クライアントのユニットは `mqvpn` deb に、サーバーのユニットは `mqvpn-server` deb に含まれます。ソースからビルドした場合は手動でインストールします：
 
 ```bash
 sudo cmake --install build --prefix /usr/local
@@ -521,7 +598,18 @@ sudo cmake --install build --prefix /usr/local
 
 ### サーバー
 
-install.sh を使った場合は `/etc/mqvpn/server.conf` が自動生成されています。手動で設定する場合はサンプルをコピーします：
+`mqvpn-server` deb がセットアップの失敗を報告した場合、`server.conf` は作成されず、サーバーも起動していません。インストール時に表示されたエラーを修正してから、`sudo dpkg-reconfigure mqvpn-server` を実行してください。ポートなどインストール時の回答が使われますが、環境変数で指定した設定は保持されないため、`sudo env MQVPN_SUBNET=10.8.0.0/24 dpkg-reconfigure mqvpn-server` のように再度指定してください。エラーが報告されなければ `sudo systemctl enable --now mqvpn-server` を実行します。起動時に自動で開始しない場合は `sudo systemctl start mqvpn-server` を実行してください。
+
+`mqvpn-server` deb または install.sh でインストールした場合は `/etc/mqvpn/server.conf` が自動生成されており、クライアントが使う認証キーが含まれています。サンプルで置き換えずにこのファイルを編集し、変更を反映するためにサーバーを再起動します：
+
+```bash
+sudo vi /etc/mqvpn/server.conf
+sudo systemctl restart mqvpn-server
+```
+
+サーバーが起動時に自動で開始されない場合（インストール時に自動起動をオフにした場合など）は、`sudo systemctl enable mqvpn-server` を実行してください。
+
+`server.conf` がない場合（ソースからビルドした場合など）は、サンプルをコピーします：
 
 ```bash
 sudo cp /etc/mqvpn/server.conf.example /etc/mqvpn/server.conf
@@ -541,5 +629,10 @@ sudo systemctl enable --now mqvpn-client@home
 ```
 
 ::: info
-systemd ユニットは INI 形式の `.conf` ファイルを前提としています。サーバーユニットの NAT ヘルパースクリプトも INI を直接パースするため、標準ユニットのままでは JSON は使用できません。
+systemd ユニットは上記の `.conf` パスを使います。内容は INI・JSON のどちらでも
+指定でき、サーバーの NAT ヘルパーは起動時に mqvpn 本体と同じ設定パーサを使います。
+停止時は設定ファイルが変更・削除されていても、追加したファイアウォールルールを
+削除し、保存済みの転送設定を復元します。
+手動でインストールする場合は、`mqvpn-server-nat.sh` と `mqvpn-nat-config` を
+インストール先の `lib/mqvpn` ディレクトリに一緒に配置してください。
 :::

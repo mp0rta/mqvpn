@@ -3,6 +3,7 @@
 
 package com.mqvpn.sdk.core
 
+import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.ReorderStats
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -39,10 +40,51 @@ class MqvpnTunnelTest {
         assertEquals(ReorderStats(), reorder.getReorderStats())
     }
 
+    private fun applyRedundant(c: MqvpnConfig): Pair<Int?, List<Triple<Long, Boolean, List<Int>>>> {
+        val calls = mutableListOf<Triple<Long, Boolean, List<Int>>>()
+        val rc = MqvpnTunnel.applyRedundant(7L, c) { cfg, en, ports -> calls += Triple(cfg, en, ports.toList()); 0 }
+        return rc to calls
+    }
+
+    @Test
+    fun `applyRedundant sets the ports once when enabled`() {
+        val (rc, calls) = applyRedundant(MqvpnConfig(serverAddress = "h", authKey = "k",
+            redundantEnabled = true, redundantPorts = listOf(4200)))
+        assertEquals(0, rc)
+        assertEquals(listOf(Triple(7L, true, listOf(4200))), calls)
+    }
+
+    @Test
+    fun `applyRedundant with no ports passes an empty array`() {
+        val (_, calls) = applyRedundant(MqvpnConfig(serverAddress = "h", authKey = "k", redundantEnabled = true))
+        assertEquals(listOf(Triple(7L, true, emptyList<Int>())), calls)
+    }
+
+    @Test
+    fun `applyRedundant makes no call when disabled`() {
+        val (rc, calls) = applyRedundant(MqvpnConfig(serverAddress = "h", authKey = "k", redundantPorts = listOf(4200)))
+        assertEquals(null, rc)
+        assertTrue(calls.isEmpty())
+    }
+
     @Test
     fun `destroy on a destroyed tunnel is a no-op`() {
         t.destroy()
         t.destroy()
         assertEquals(0L, t.clientHandle)
+    }
+
+    @Test
+    fun `decodeReorderStats marshals the 12 residence buckets from indices 7 to 18`() {
+        val a = LongArray(19) { it.toLong() }
+        val s = decodeReorderStats(a)
+        assertEquals(0L, s.delivered)
+        assertEquals(6L, s.bufferedP99Ms)
+        assertEquals((7L..18L).toList(), s.residenceBuckets)
+    }
+
+    @Test
+    fun `decodeReorderStats of a stale 7-entry array is the empty default`() {
+        assertEquals(ReorderStats(), decodeReorderStats(LongArray(7) { 1L }))
     }
 }

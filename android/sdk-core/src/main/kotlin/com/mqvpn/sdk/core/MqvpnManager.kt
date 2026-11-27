@@ -3,44 +3,31 @@
 
 package com.mqvpn.sdk.core
 
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.net.VpnService
-import android.os.IBinder
-import android.util.Log
+import androidx.annotation.MainThread
 import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
 import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.VpnStats
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Public-facing manager for the mqvpn SDK.
  *
- * Provides [StateFlow]-based observation of VPN state, stats, and paths.
- * Manages the VpnService lifecycle via [ServiceConnection].
+ * Provides [StateFlow]-based observation of VPN state, stats, and paths. The
+ * flows are process-wide and written only by the running [MqvpnVpnService],
+ * so any number of managers, created at any time, see the live session.
  */
 class MqvpnManager(private val context: Context) {
 
-    private val _vpnState = MutableStateFlow<MqvpnState>(MqvpnState.Disconnected)
-    val vpnState: StateFlow<MqvpnState> = _vpnState.asStateFlow()
-
-    private val _stats = MutableStateFlow(VpnStats())
-    val stats: StateFlow<VpnStats> = _stats.asStateFlow()
-
-    private val _paths = MutableStateFlow<List<PathInfo>>(emptyList())
-    val paths: StateFlow<List<PathInfo>> = _paths.asStateFlow()
-
-    private val _reorderStats = MutableStateFlow(ReorderStats())
-    val reorderStats: StateFlow<ReorderStats> = _reorderStats.asStateFlow()
-
-    private var boundService: MqvpnVpnService? = null
-    private var serviceConnection: ServiceConnection? = null
+    val vpnState: StateFlow<MqvpnState> = SessionStore.state.asStateFlow()
+    val stats: StateFlow<VpnStats> = SessionStore.stats.asStateFlow()
+    val paths: StateFlow<List<PathInfo>> = SessionStore.paths.asStateFlow()
+    val reorderStats: StateFlow<ReorderStats> = SessionStore.reorderStats.asStateFlow()
 
     /**
      * Prepare VPN permission. Returns null if already granted,
@@ -49,76 +36,30 @@ class MqvpnManager(private val context: Context) {
     fun prepareVpn(): Intent? = VpnService.prepare(context)
 
     /**
-     * Start VPN with the given config.
-     * Launches the VpnService, binds to it, and calls startTunnel().
+     * Start VPN with the given config: starts [serviceClass] in the
+     * foreground, which then calls [MqvpnVpnService.startTunnel]. [vpnState]
+     * turns Connecting once the service picks the config up.
      *
      * While a session is running the service refuses a second connect and
-     * keeps that session without re-emitting its state, so [vpnState] stays
-     * at the Connecting set here; call [disconnect] first.
+     * keeps that session; call [disconnect] first.
      *
      * @throws IllegalArgumentException when [MqvpnConfig.serverAddress] or
      *   [MqvpnConfig.tlsServerName] is not a bare ASCII identifier (see
-     *   [MqvpnConfig.hostIdentifierError]). Thrown before any state change or
-     *   service start.
+     *   [MqvpnConfig.hostIdentifierError]). Thrown before the service starts.
      */
+    @MainThread
     fun connect(config: MqvpnConfig, serviceClass: Class<out MqvpnVpnService>) {
-        // synchronous: a bad host must fail here, not inside the service (whose executor only logs)
+        // synchronous: a bad host must fail here, not inside the service
         config.hostIdentifierError()?.let { throw IllegalArgumentException(it) }
-        unbind() // release any binding left from a previous connect
-        _vpnState.value = MqvpnState.Connecting
-
-        val intent = Intent(context, serviceClass).apply {
-            putExtra(EXTRA_CONFIG_JSON, config.toJson())
-        }
-        context.startForegroundService(intent)
-
-        // Bind to service for lifecycle observation
-        val conn = object : ServiceConnection {
-            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-                val binder = service as? MqvpnVpnService.LocalBinder ?: return
-                val svc = binder.getService()
-                boundService = svc
-                svc.manager = this@MqvpnManager
-            }
-
-            override fun onServiceDisconnected(name: ComponentName?) {
-                // Service crashed or was killed — reset state to prevent UI divergence
-                boundService?.manager = null
-                boundService = null
-                _vpnState.value = MqvpnState.Disconnected
-                resetMetrics()
-            }
-        }
-        serviceConnection = conn
-        try {
-            context.bindService(intent, conn, Context.BIND_AUTO_CREATE)
-        } catch (e: Exception) {
-            Log.w(TAG, "bindService failed: ${e.message}")
-        }
+        context.startForegroundService(
+            Intent(context, serviceClass).putExtra(EXTRA_CONFIG_JSON, config.toJson()),
+        )
     }
 
-    /** Disconnect the VPN. */
+    /** Disconnect the VPN; [vpnState] turns Disconnected once the session is torn down. */
+    @MainThread
     fun disconnect() {
-        boundService?.stopTunnel()
-        // Release the binding: a started+bound service is not destroyed by
-        // stopSelf() while a BIND_AUTO_CREATE binding remains, so keeping it
-        // would leave the foreground service (and its notification) running.
-        unbind()
-        _vpnState.value = MqvpnState.Disconnected
-        resetMetrics()
-    }
-
-    private fun unbind() {
-        boundService?.manager = null
-        boundService = null
-        serviceConnection?.let { conn ->
-            try {
-                context.unbindService(conn)
-            } catch (_: IllegalArgumentException) {
-                // bindService failed earlier; nothing was registered
-            }
-        }
-        serviceConnection = null
+        SessionStore.service?.stopTunnel()
     }
 
     /** Get libmqvpn version string. */
@@ -127,42 +68,7 @@ class MqvpnManager(private val context: Context) {
     /** Generate a random PSK key. */
     fun generateKey(): String = MqvpnSdk.generateKey()
 
-    /** Update state (called from VpnService). */
-    internal fun updateState(state: MqvpnState) {
-        _vpnState.value = state
-    }
-
-    /** Update stats (called from VpnService). */
-    internal fun updateStats(s: VpnStats) {
-        _stats.value = s
-    }
-
-    /** Update paths (called from VpnService). */
-    internal fun updatePaths(p: List<PathInfo>) {
-        _paths.value = p
-    }
-
-    /** Update reorder stats (called from VpnService). */
-    internal fun updateReorderStats(s: ReorderStats) { _reorderStats.value = s }
-
-    /** Reset all metric flows to zero (called on service disconnect). */
-    internal fun resetMetrics() {
-        _stats.value = VpnStats()
-        _paths.value = emptyList()
-        _reorderStats.value = ReorderStats()
-    }
-
-    fun destroy() {
-        boundService?.manager = null
-        serviceConnection?.let { conn ->
-            try { context.unbindService(conn) } catch (_: Exception) {}
-        }
-        serviceConnection = null
-        boundService = null
-    }
-
     companion object {
-        private const val TAG = "MqvpnManager"
         internal const val EXTRA_CONFIG_JSON = "mqvpn_config_json"
     }
 }

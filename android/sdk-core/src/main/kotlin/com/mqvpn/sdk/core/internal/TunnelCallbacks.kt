@@ -7,7 +7,7 @@ package com.mqvpn.sdk.core.internal
  * Callback interface invoked by JNI (mqvpn_jni.c) on the executor thread.
  *
  * The callback object passed to [NativeBridge.clientNew] must implement
- * these methods. MqvpnVpnService implements this interface.
+ * these methods. [com.mqvpn.sdk.core.Session] implements this interface.
  */
 internal interface TunnelCallbacks {
     fun onNativeTunnelConfigReady(

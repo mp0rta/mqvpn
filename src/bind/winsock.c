@@ -9,6 +9,7 @@
 
 #include "mqvpn_bind_winsock.h"
 #include "log.h"
+#include "compat/socket_compat.h"
 
 #include <stddef.h>
 #include <stdio.h>
@@ -85,6 +86,8 @@ ws_ops_send(void *vctx, const mqvpn_datagram_t *bufs, unsigned n,
             r = WS_SENDTO(c->sock, (const char *)bufs[sent].data, (int)bufs[sent].len, 0,
                           peer, peer_len);
         } while (r == SOCKET_ERROR && (err = WSAGetLastError()) == WSAEINTR);
+        /* too large for the interface with DF set (PMTUD): a lost packet */
+        if (r == SOCKET_ERROR && err == WSAEMSGSIZE) continue;
         if (r == SOCKET_ERROR) break;
         c->tx.tx_sends++;
         c->tx.tx_datagrams++;
@@ -122,6 +125,20 @@ mqvpn_bind_winsock_path_new(SOCKET sock, const mqvpn_bind_winsock_opts_t *opts,
     if (!WS_OPT_HAS(opts, socket_buf_bytes)) return MQVPN_ERR_INVALID_ARG;
     bind_winsock_ctx_t *c = WS_CALLOC(1, sizeof(*c));
     if (!c) return MQVPN_ERR_NO_MEMORY;
+    /* DF after the allocation and before anything else changes the socket,
+     * so a failure leaves it as it was: PMTUD cannot work on a socket that
+     * fragments, so the bind is refused (as the POSIX bind) */
+    if (WS_OPT_HAS(opts, dont_fragment) && opts->dont_fragment) {
+        struct sockaddr_storage ss;
+        int ss_len = (int)sizeof(ss);
+        if (getsockname(sock, (struct sockaddr *)&ss, &ss_len) != 0 ||
+            mqvpn_socket_set_dontfrag(sock, ss.ss_family) < 0) {
+            LOG_ERR("bind-winsock: cannot set DF on socket %llu: WSA %d",
+                    (unsigned long long)sock, WSAGetLastError());
+            free(c);
+            return MQVPN_ERR_INVALID_STATE;
+        }
+    }
     c->sock = sock;
     /* Prefix copy: a field is read only when the caller's struct_size covers
      * it whole, and opts is never retained. An uncovered tag stays "". */

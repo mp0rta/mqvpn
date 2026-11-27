@@ -20,11 +20,6 @@
  * future xquic merge renumbers the enum, this file fails to compile and the
  * mirror must be updated in lockstep.
  *
- * app_path_status is deliberately NOT pinned here: mqvpn only relays those
- * classes to xquic through the named xqc_conn_mark_path_* calls (see
- * client_notify_xqc_path_state), never by numeric value, so there is no ABI
- * value dependency to guard.
- *
  * There is no runtime behaviour here — the _Static_asserts are the test.
  */
 

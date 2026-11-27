@@ -50,6 +50,31 @@
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
+/* C values the Kotlin side writes as plain numbers. If one fails, change the
+ * named Kotlin file in the same commit. */
+_Static_assert(MQVPN_STATE_CONNECTING == 1 && MQVPN_STATE_AUTHENTICATING == 2 &&
+                   MQVPN_STATE_RECONNECTING == 5 && MQVPN_STATE_CLOSED == 6,
+               "client states: MqvpnTunnel.kt, MqvpnVpnService.kt");
+_Static_assert(MQVPN_ERR_ENGINE == -3 && MQVPN_ERR_TLS == -4 && MQVPN_ERR_AUTH == -5 &&
+                   MQVPN_ERR_PROTOCOL == -6 && MQVPN_ERR_CLOSED == -10 &&
+                   MQVPN_ERR_ABI_MISMATCH == -11 && MQVPN_ERR_TIMEOUT == -12 &&
+                   MQVPN_ERR_INVALID_STATE == -13,
+               "error codes: MqvpnError.kt, MqvpnTunnel.kt, MqvpnVpnService.kt");
+_Static_assert(MQVPN_PATH_PENDING == 0 && MQVPN_PATH_ACTIVE == 1 &&
+                   MQVPN_PATH_DEGRADED == 2 && MQVPN_PATH_STANDBY == 3 &&
+                   MQVPN_PATH_CLOSED == 4,
+               "path status: app EventLog.kt, Derive.kt");
+_Static_assert(MQVPN_SCHED_MINRTT == 0 && MQVPN_SCHED_WLB == 1 &&
+                   MQVPN_SCHED_BACKUP_FEC == 2 && MQVPN_SCHED_WLB_UDP_PIN == 3,
+               "MqvpnConfig.Scheduler");
+_Static_assert(MQVPN_CC_BBR2 == 0 && MQVPN_CC_BBR == 1 && MQVPN_CC_CUBIC == 2,
+               "MqvpnConfig.CongestionControl");
+_Static_assert(MQVPN_LOG_DEBUG == 0 && MQVPN_LOG_INFO == 1 && MQVPN_LOG_WARN == 2 &&
+                   MQVPN_LOG_ERROR == 3,
+               "MqvpnConfig.LogLevel");
+_Static_assert(MQVPN_RPROF_CELLULAR_BOND == 3 && MQVPN_RPROF_FIBER_LTE == 4,
+               "MqvpnConfig.ReorderProfile");
+
 /* Android transport policy. Pushed to BOTH the core (mqvpn_config_set_udp_gso
  * in clientNew) and the bind (reactorAddPath), the way the Linux platform
  * pushes its parsed UdpGso to both, so core batching and bind GSO can never
@@ -696,6 +721,15 @@ JNI_FN(configSetRequestServerScheduler)(JNIEnv *env, jobject thiz, jlong cfg,
                                                      enable ? 1 : 0);
 }
 
+/* configSetCc(cfg, cc) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetCc)(JNIEnv *env, jobject thiz, jlong cfg, jint cc)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_cc((mqvpn_config_t *)(intptr_t)cfg, (mqvpn_cc_t)cc);
+}
+
 /* configSetLogLevel(cfg, level) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetLogLevel)(JNIEnv *env, jobject thiz, jlong cfg, jint level)
@@ -774,6 +808,27 @@ JNI_FN(configSetKillswitchHint)(JNIEnv *env, jobject thiz, jlong cfg, jboolean e
                                             enable ? 1 : 0);
 }
 
+/* configSetPathMtu(cfg, mtu) → int */
+_Static_assert(MQVPN_MTU_MIN == 1280 && MQVPN_MTU_MAX == 9000,
+               "MqvpnTunnel.kt checks pathMtu against 1280..9000");
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPathMtu)(JNIEnv *env, jobject thiz, jlong cfg, jint mtu)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_path_mtu((mqvpn_config_t *)(intptr_t)cfg, (int)mtu);
+}
+
+/* configSetPmtud(cfg, enable) → int. The reactor then sets DF on the path
+ * sockets (mqvpn_client_pmtud_enabled). */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetPmtud)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enable)
+{
+    (void)env;
+    (void)thiz;
+    return mqvpn_config_set_pmtud((mqvpn_config_t *)(intptr_t)cfg, enable ? 1 : 0);
+}
+
 /* configSetReorderEnabled(cfg, mode) → int */
 JNIEXPORT jint JNICALL
 JNI_FN(configSetReorderEnabled)(JNIEnv *env, jobject thiz, jlong cfg, jint mode)
@@ -796,6 +851,29 @@ JNI_FN(configAddReorderRule)(JNIEnv *env, jobject thiz, jlong cfg, jint proto, j
     return mqvpn_config_add_reorder_rule((mqvpn_config_t *)(intptr_t)cfg, (uint8_t)proto,
                                          (uint16_t)port,
                                          (mqvpn_reorder_profile_t)profile);
+}
+
+/* configSetRedundant(cfg, enabled, ports) → int */
+JNIEXPORT jint JNICALL
+JNI_FN(configSetRedundant)(JNIEnv *env, jobject thiz, jlong cfg, jboolean enabled,
+                           jintArray ports)
+{
+    (void)thiz;
+    jsize n = ports ? (*env)->GetArrayLength(env, ports) : 0;
+    if (n > MQVPN_REDUNDANT_MAX_PORTS) return MQVPN_ERR_INVALID_ARG;
+    uint16_t narrowed[MQVPN_REDUNDANT_MAX_PORTS];
+    if (n > 0) {
+        jint raw[MQVPN_REDUNDANT_MAX_PORTS];
+        (*env)->GetIntArrayRegion(env, ports, 0, n, raw);
+        if ((*env)->ExceptionCheck(env)) return MQVPN_ERR_INVALID_ARG;
+        for (jsize i = 0; i < n; i++) {
+            /* validate before narrowing: 65537 must not become port 1 */
+            if (raw[i] < 1 || raw[i] > 65535) return MQVPN_ERR_INVALID_ARG;
+            narrowed[i] = (uint16_t)raw[i];
+        }
+    }
+    return mqvpn_config_set_redundant((mqvpn_config_t *)(intptr_t)cfg, enabled ? 1 : 0,
+                                      n > 0 ? narrowed : NULL, (size_t)n);
 }
 
 /* configSetHybridEnabled(cfg, enable) → int */
@@ -1110,12 +1188,12 @@ JNI_FN(reactorTakeBadFd)(JNIEnv *env, jobject thiz, jlong reactor)
         (mqvpn_android_reactor_t *)(intptr_t)reactor);
 }
 
-/* reactorAddPath(reactor, client, fd, iface) → long (path handle), -1 on
+/* reactorAddPath(reactor, client, fd, iface, flags) → long (path handle), -1 on
  * failure with the fd untouched (Kotlin closes it). The fd is BORROWED: the
  * bind ctx never closes it. */
 JNIEXPORT jlong JNICALL
 JNI_FN(reactorAddPath)(JNIEnv *env, jobject thiz, jlong reactor, jlong client, jint fd,
-                       jstring iface)
+                       jstring iface, jint flags)
 {
     (void)thiz;
     char name[16] = {0};
@@ -1128,7 +1206,7 @@ JNI_FN(reactorAddPath)(JNIEnv *env, jobject thiz, jlong reactor, jlong client, j
     }
     return (jlong)mqvpn_android_reactor_add_path(
         (mqvpn_android_reactor_t *)(intptr_t)reactor, (mqvpn_client_t *)(intptr_t)client,
-        (int)fd, name, ANDROID_UDP_GSO, ANDROID_UDP_GRO);
+        (int)fd, name, ANDROID_UDP_GSO, ANDROID_UDP_GRO, (uint32_t)flags);
 }
 
 /* reactorRemovePath(reactor, client, pathHandle) → int. Orderly removal:
@@ -1255,12 +1333,11 @@ JNIEXPORT jobjectArray JNICALL
 JNI_FN(getPaths)(JNIEnv *env, jobject thiz, jlong client)
 {
     (void)thiz;
-    enum { MAX_PATHS = 8 };
-    mqvpn_path_info_t paths[MAX_PATHS];
+    mqvpn_path_info_t paths[MQVPN_MAX_PATHS];
     int n_paths = 0;
 
     int rc = mqvpn_client_get_paths((const mqvpn_client_t *)(intptr_t)client, paths,
-                                    MAX_PATHS, &n_paths);
+                                    MQVPN_MAX_PATHS, &n_paths);
     if (rc != MQVPN_OK || n_paths <= 0) return NULL;
 
     /* Classes and boxing methods: looked up once per call. */
@@ -1340,7 +1417,8 @@ JNI_FN(getInterest)(JNIEnv *env, jobject thiz, jlong client)
 /*
  * getReorderStats(client) → LongArray:
  * [deliveredCount, gapCount, gapFilledCount, gapTimeoutCount,
- *  ackDemoteCount, p50Ms, p99Ms]
+ *  ackDemoteCount, p50Ms, p99Ms,
+ *  residence_bucket[0..11]]   (19 entries; buckets at indices 7-18)
  */
 JNIEXPORT jlongArray JNICALL
 JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
@@ -1354,14 +1432,18 @@ JNI_FN(getReorderStats)(JNIEnv *env, jobject thiz, jlong client)
     double p50 = mqvpn_reorder_latency_buffered_percentile(&st, 0.50);
     double p99 = mqvpn_reorder_latency_buffered_percentile(&st, 0.99);
 
-    jlong values[7] = {
+    jlong values[19] = {
         (jlong)st.delivered_count,  (jlong)st.gap_count,
         (jlong)st.gap_filled_count, (jlong)st.gap_timeout_count,
         (jlong)st.ack_demote_count, (jlong)(p50 + 0.5),
         (jlong)(p99 + 0.5),
     };
-    jlongArray arr = (*env)->NewLongArray(env, 7);
-    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 7, values);
+    _Static_assert(MQVPN_REORDER_LAT_BUCKETS == 12,
+                   "bucket count changed: update this array and the Kotlin decoder");
+    for (int i = 0; i < 12; i++)
+        values[7 + i] = (jlong)st.residence_bucket[i];
+    jlongArray arr = (*env)->NewLongArray(env, 19);
+    if (arr) (*env)->SetLongArrayRegion(env, arr, 0, 19, values);
     return arr;
 }
 

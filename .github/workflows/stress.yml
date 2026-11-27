@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -63,17 +63,15 @@ jobs:
           path: |
             third_party/xquic/build
             third_party/xquic/include/xquic/xqc_configure.h
-          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-stress-v3
+          key: xquic-${{ steps.xqsha.outputs.sha }}-linux-clang-debug-bssl-${{ steps.bssl-pin.outputs.sha }}-stress-v3-${{ hashFiles('scripts/xquic-cmake-flags') }}
 
       - name: Build xquic
         if: steps.xquic-cache.outputs.cache-hit != 'true'
         run: |
           cd third_party/xquic
           mkdir -p build && cd build
-          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug -DSSL_TYPE=boringssl \
-            -DXQC_ENABLE_BBR2=ON \
-            -DXQC_ENABLE_FEC=ON \
-            -DXQC_ENABLE_XOR=ON \
+          CC=clang cmake -DCMAKE_BUILD_TYPE=Debug \
+            $(cat "$GITHUB_WORKSPACE/scripts/xquic-cmake-flags") \
             -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" ..
           make -j$(nproc)
 
@@ -97,7 +95,7 @@ jobs:
 
   long-running:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -127,7 +125,7 @@ jobs:
 
   reconnect-storm:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -157,7 +155,7 @@ jobs:
 
   multi-client:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -187,7 +185,7 @@ jobs:
 
   failover-storm:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7

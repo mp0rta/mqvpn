@@ -60,7 +60,7 @@ Row(pre, c) ==
   IN [pre |-> pre, ev |-> c.ev, result |-> c.result, target |-> c.target,
       reached |-> c.reached, prefix |-> CallerPrefix(pre, c.ev),
       post |-> out.slot, status |-> Fsm!Projection(out.slot.state),
-      fires |-> out.fires, notify |-> out.notify,
+      fires |-> out.fires,
       retryUpd |-> out.retryUpd, stableUpd |-> out.stableUpd,
       retriesUpd |-> out.retriesUpd]
 

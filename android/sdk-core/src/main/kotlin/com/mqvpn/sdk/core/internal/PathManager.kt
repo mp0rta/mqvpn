@@ -7,9 +7,12 @@ import android.net.Network
 import android.system.OsConstants
 import android.util.Log
 import com.mqvpn.sdk.core.MqvpnTunnel
+import com.mqvpn.sdk.core.model.MqvpnConfig
 import com.mqvpn.sdk.native_.NativeBridge
 import com.mqvpn.sdk.network.NetworkEvent
 import com.mqvpn.sdk.network.NetworkMonitor
+import com.mqvpn.sdk.network.NetworkPath
+import com.mqvpn.sdk.network.PathType
 import com.mqvpn.sdk.network.PathBinder
 import com.mqvpn.sdk.runtime.ExecutorStoppedException
 import com.mqvpn.sdk.runtime.MqvpnExecutor
@@ -29,6 +32,16 @@ import kotlinx.coroutines.withContext
  * - tunnel.addPath/connect/removePath/pathReleased are serialized via executor.call
  * - handleBadFd() is called by the executor ON the engine thread
  */
+/** Failover: networks of a type the config marks as backup are the backups of the others. */
+internal fun isBackupPath(config: MqvpnConfig, path: NetworkPath): Boolean =
+    config.scheduler == MqvpnConfig.Scheduler.FAILOVER && when (path.type) {
+        PathType.WIFI -> config.wifiPathBackup
+        PathType.CELLULAR -> config.cellularPathBackup
+        PathType.ETHERNET -> config.ethernetPathBackup
+        PathType.BLUETOOTH -> config.bluetoothPathBackup
+        PathType.OTHER -> false
+    }
+
 internal class PathManager(
     private val executor: MqvpnExecutor,
     private val tunnel: MqvpnTunnel,
@@ -43,6 +56,8 @@ internal class PathManager(
             PathBinder.bindAndDetachUdp(network, host, port, prot)
         },
     private val closeFd: (Int) -> Unit = ::closeFdSafe,
+    /** Whether a network joins as a backup path (MQVPN_PATH_FLAG_BACKUP). */
+    private val isBackup: (NetworkPath) -> Boolean = { false },
 ) {
     private var connected = false
     private val pathHandles = mutableMapOf<Network, Long>()  // network → pathHandle
@@ -84,7 +99,7 @@ internal class PathManager(
                 Log.i(TAG, "Network $name lost during bind, discarding fd")
                 return@handOver ABORT_LOST_DURING_BIND
             }
-            val h = tunnel.addPath(fd, name)
+            val h = tunnel.addPath(fd, name, isBackup(event.path))
             if (h < 0) {
                 Log.e(TAG, "addPath failed for $name: $h")
                 return@handOver h

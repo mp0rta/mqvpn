@@ -3,14 +3,16 @@
 
 package com.mqvpn.sdk.core
 
+import android.os.ParcelFileDescriptor
 import com.mqvpn.sdk.core.model.MqvpnConfig
-import com.mqvpn.sdk.core.model.MqvpnError
 import com.mqvpn.sdk.core.model.MqvpnState
 import com.mqvpn.sdk.core.model.PathInfo
+import com.mqvpn.sdk.core.model.ReconnectInfo
 import com.mqvpn.sdk.core.model.ReorderStats
 import com.mqvpn.sdk.core.model.TunnelInfo
 import com.mqvpn.sdk.core.model.VpnStats
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -18,6 +20,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 class MqvpnManagerTest {
@@ -26,139 +29,85 @@ class MqvpnManagerTest {
 
     @Before
     fun setUp() {
+        // the store is process-wide: start every test from a fresh process
+        SessionStore.state.value = MqvpnState.Disconnected
+        SessionStore.resetMetrics()
+        SessionStore.service = null
         manager = MqvpnManager(RuntimeEnvironment.getApplication())
     }
 
     @Test
-    fun `initial state is Disconnected`() {
+    fun `initial state is Disconnected with empty metrics`() {
         assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
-    }
-
-    @Test
-    fun `initial stats are zeros`() {
-        val stats = manager.stats.value
-        assertEquals(0L, stats.bytesTx)
-        assertEquals(0L, stats.bytesRx)
-        assertEquals(0, stats.srttMs)
-    }
-
-    @Test
-    fun `initial paths are empty`() {
+        assertEquals(VpnStats(), manager.stats.value)
         assertTrue(manager.paths.value.isEmpty())
+        assertEquals(ReorderStats(), manager.reorderStats.value)
     }
 
     @Test
-    fun `connect transitions to Connecting state`() {
-        val config = MqvpnConfig(
-            serverAddress = "10.0.0.1",
-            authKey = "test-key",
-        )
-        manager.connect(config, MqvpnVpnService::class.java)
-        assertEquals(MqvpnState.Connecting, manager.vpnState.value)
+    fun connect_startsTheServiceWithTheConfig_withoutWritingState() {
+        val config = MqvpnConfig(serverAddress = "10.0.0.1", authKey = "test-key")
+        manager.connect(config, TestVpnService::class.java)
+
+        val intent = shadowOf(RuntimeEnvironment.getApplication()).nextStartedService
+        assertEquals(TestVpnService::class.java.name, intent.component?.className)
+        assertEquals(config, MqvpnConfig.fromJson(intent.getStringExtra(MqvpnManager.EXTRA_CONFIG_JSON)!!))
+        // the service is the only writer: Connecting comes from its startTunnel
+        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
     }
 
     @Test
     fun connect_rejectsBadHostSynchronously() {
-        val config = MqvpnConfig(
-            serverAddress = "[2001:db8::1]",
-            authKey = "test-key",
-        )
+        val config = MqvpnConfig(serverAddress = "[2001:db8::1]", authKey = "test-key")
         assertThrows(IllegalArgumentException::class.java) {
-            manager.connect(config, MqvpnVpnService::class.java)
+            manager.connect(config, TestVpnService::class.java)
         }
-        assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
+        assertNull(shadowOf(RuntimeEnvironment.getApplication()).nextStartedService)
     }
 
     @Test
-    fun `disconnect transitions to Disconnected state`() {
-        manager.updateState(MqvpnState.Connecting)
-        assertEquals(MqvpnState.Connecting, manager.vpnState.value)
+    fun disconnect_reachesTheRunningService() {
+        val svc = TestVpnService()
+        SessionStore.service = svc
 
+        manager.disconnect()
+
+        assertEquals(1, svc.stopTunnelCalls)
+    }
+
+    @Test
+    fun disconnect_withoutAServiceIsANoOp() {
         manager.disconnect()
         assertEquals(MqvpnState.Disconnected, manager.vpnState.value)
     }
 
     @Test
-    fun `updateState changes vpnState flow`() {
-        val tunnelInfo = TunnelInfo(
-            assignedIp = "10.8.0.2",
-            prefix = 24,
-            serverIp = "10.8.0.1",
-            serverPrefix = 24,
-            mtu = 1400,
-        )
-        manager.updateState(MqvpnState.Connected(tunnelInfo))
-        val state = manager.vpnState.value
-        assertTrue(state is MqvpnState.Connected)
-        assertEquals("10.8.0.2", (state as MqvpnState.Connected).tunnelInfo.assignedIp)
+    fun aManagerCreatedMidSession_seesTheLiveSession() {
+        // a recreated ViewModel (activity destroyed while the VPN kept
+        // running) must see the session at once, with no re-attach
+        val path = PathInfo(handle = 1, status = 1, iface = "wlan0", bytesTx = 5, bytesRx = 9, srttMs = 30)
+        SessionStore.state.value = MqvpnState.Reconnecting(ReconnectInfo(3))
+        SessionStore.stats.value = VpnStats(bytesTx = 7)
+        SessionStore.paths.value = listOf(path)
+
+        val late = MqvpnManager(RuntimeEnvironment.getApplication())
+
+        assertEquals(MqvpnState.Reconnecting(ReconnectInfo(3)), late.vpnState.value)
+        assertEquals(VpnStats(bytesTx = 7), late.stats.value)
+        assertEquals(listOf(path), late.paths.value)
     }
 
-    @Test
-    fun `updateState with Error`() {
-        val error = MqvpnError.AuthFailed("PSK authentication failed")
-        manager.updateState(MqvpnState.Error(error))
-        val state = manager.vpnState.value
-        assertTrue(state is MqvpnState.Error)
-        assertEquals(error, (state as MqvpnState.Error).error)
-    }
+    private class TestVpnService : MqvpnVpnService() {
+        var stopTunnelCalls = 0
 
-    @Test
-    fun `updateStats changes stats flow`() {
-        val newStats = VpnStats(
-            bytesTx = 1000,
-            bytesRx = 2000,
-            dgramSent = 10,
-            dgramRecv = 20,
-            dgramLost = 1,
-            dgramAcked = 9,
-            srttMs = 50,
-        )
-        manager.updateStats(newStats)
-        assertEquals(newStats, manager.stats.value)
-    }
+        override fun onCreateTun(info: TunnelInfo, config: MqvpnConfig): ParcelFileDescriptor =
+            throw UnsupportedOperationException("not used in tests")
 
-    @Test
-    fun `updatePaths changes paths flow`() {
-        val pathList = listOf(
-            PathInfo(handle = 1, status = 1, iface = "wlan0", bytesTx = 500, bytesRx = 1000, srttMs = 30),
-            PathInfo(handle = 2, status = 1, iface = "rmnet0", bytesTx = 200, bytesRx = 400, srttMs = 80),
-        )
-        manager.updatePaths(pathList)
-        assertEquals(2, manager.paths.value.size)
-        assertEquals("wlan0", manager.paths.value[0].iface)
-        assertEquals("rmnet0", manager.paths.value[1].iface)
-    }
+        override fun onVpnStateChanged(newState: MqvpnState) {}
 
-    @Test
-    fun `destroy clears service binding`() {
-        manager.destroy()
-        // Should not throw
-        manager.destroy() // idempotent
-    }
-
-    @Test
-    fun reorderStats_initialValueIsAllZero() {
-        val mgr = MqvpnManager(RuntimeEnvironment.getApplication())
-        assertEquals(ReorderStats(), mgr.reorderStats.value)
-    }
-
-    @Test
-    fun updateReorderStats_emitsToFlow() {
-        val mgr = MqvpnManager(RuntimeEnvironment.getApplication())
-        val s = ReorderStats(delivered = 10, gapFilled = 3)
-        mgr.updateReorderStats(s)
-        assertEquals(s, mgr.reorderStats.value)
-    }
-
-    @Test
-    fun resetMetrics_clearsAllFlows() {
-        val mgr = MqvpnManager(RuntimeEnvironment.getApplication())
-        mgr.updateStats(VpnStats(bytesTx = 1))
-        mgr.updatePaths(listOf(PathInfo(handle = 1, status = 1, iface = "wlan0", bytesTx = 500, bytesRx = 1000, srttMs = 30)))
-        mgr.updateReorderStats(ReorderStats(delivered = 5))
-        mgr.resetMetrics()
-        assertEquals(VpnStats(), mgr.stats.value)
-        assertEquals(emptyList<PathInfo>(), mgr.paths.value)
-        assertEquals(ReorderStats(), mgr.reorderStats.value)
+        // the real one enqueues on the executor, which only exists after onCreate
+        override fun stopTunnel() {
+            stopTunnelCalls++
+        }
     }
 }

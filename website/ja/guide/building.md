@@ -5,7 +5,7 @@
 ### 必要なもの
 
 - Git
-- CMake 3.10+
+- CMake 3.22+
 - Make（GNU Make）
 - GCC または Clang（C11）
 - libevent 2.x
@@ -13,6 +13,15 @@
 ::: info
 サブモジュール取得（`git submodule update --init --recursive`、BoringSSL を含む）にインターネット接続が必要です。
 :::
+
+Debian / Ubuntu では、deb パッケージのビルドに使うツールを含むビルド依存パッケージが `packaging/build-deps.control` にまとめてあります。
+
+```bash
+# Debian/Ubuntu: ビルド依存パッケージをインストール（packaging/build-deps.control）
+sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"   # リポジトリのルートで実行
+# devscripts と equivs がある場合は次でも可:
+sudo mk-build-deps --install --remove packaging/build-deps.control
+```
 
 ### クイックビルド
 
@@ -28,7 +37,8 @@
 ```bash
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
 cd ../../../../..
 ```
@@ -78,7 +88,7 @@ Windows ではクライアントのみサポートされています。サーバ
 | ツール | 用途 | インストール |
 |--------|------|-------------|
 | Visual Studio 2022 Build Tools | C/C++ コンパイラ (MSVC) | `winget install Microsoft.VisualStudio.2022.BuildTools`（C++ ワークロードを選択） |
-| CMake >= 3.10 | ビルドシステム | `winget install Kitware.CMake` |
+| CMake >= 3.22 | ビルドシステム | `winget install Kitware.CMake` |
 | Go | BoringSSL に必要 | `winget install GoLang.Go` |
 | NASM | BoringSSL に必要（アセンブリ） | `winget install NASM.NASM` |
 | Perl (Strawberry Perl) | BoringSSL に必要 | `winget install StrawberryPerl.StrawberryPerl` |
@@ -203,7 +213,7 @@ android/
 ## iOS
 
 ::: info
-iOS 対応はクライアントのみで開発中です。アプリと PacketTunnel 拡張は `ios/poc/` 配下にあります。CI はフルチェーンのクロスビルドとアプリの未署名ビルドを行いますが、実機での実行には各自の署名 ID が必要です。
+iOS 対応はクライアントのみで開発中です。アプリと PacketTunnel 拡張は `ios/app/` 配下にあります。CI はフルチェーンのクロスビルドとアプリの未署名ビルドを行いますが、実機での実行には各自の署名 ID が必要です。
 :::
 
 ### 前提条件
@@ -225,10 +235,10 @@ iOS 対応はクライアントのみで開発中です。アプリと PacketTun
 ### アプリと PacketTunnel 拡張のビルド
 
 ```bash
-bash ios/poc/Tests/run-host-tests.sh                         # Swift ホストテスト（SDK 不要）
+bash ios/app/Tests/run-host-tests.sh                         # Swift ホストテスト（SDK 不要）
 
-cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # DEVELOPMENT_TEAM を設定
-(cd ios/poc && xcodegen generate)                            # Xcode プロジェクトを生成
+cp ios/app/Config.example.xcconfig ios/app/Config.xcconfig   # DEVELOPMENT_TEAM を設定
+(cd ios/app && xcodegen generate)                            # Xcode プロジェクトを生成
 ```
 
 CI は同じプロジェクトを未署名（`CODE_SIGNING_ALLOWED=NO`）でビルドし、実機・シミュレータでの実行は手動ステップです。

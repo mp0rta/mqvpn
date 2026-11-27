@@ -70,7 +70,7 @@ Failover behaviour — multipath's ability to keep the connection alive when one
 - **goodput [Mbps]:** picoquicdemo's "Received … Mbps" download line.
 - **p99 added-latency [ms]:** the reorder engine's residence-time histogram (enqueue→deliver; in-order pass-through counted as 0 ms) for the data direction, i.e. the client's receive-side buffer. Path RTT is not included. The client's reorder statistics are not exposed by the shipped Linux CLI; these runs use a measurement-only build that logs them at shutdown. The histogram has power-of-two buckets, so p99 values are bucket upper bounds (1, 2, 4, … 512 ms); above 512 ms it reports the tracked maximum.
 - **Schedulers measured:** `--scheduler wlb` (the default; weighted load balance across paths) and `--scheduler minrtt` (lowest-SRTT path selection, spillover only when cwnd-blocked). Both schedulers spread the single inner UDP/QUIC flow across both paths (neither pins by 4-tuple — pinning is `--scheduler wlb_udp_pin`, not used here, since pinning trivially gives up aggregation). The difference is how aggressively each pushes traffic to the slower path.
-- **Reorder rule (when ON):** `[ReorderRule] Proto = udp / Port = 5401 / Profile = quic_bulk`; `[Reorder] Enabled = on` with `MaxWaitMs` / `CapPackets` swept.
+- **Reorder rule (when ON):** `[ReorderRule] Proto = udp / Port = 5401 / Profile = quic_bulk`; `[Reorder] Enabled = true` with `MaxWaitMs` / `CapPackets` swept.
 
 ### 3.3 Environment matrix (exact netem strings, all 16 environments)
 
@@ -221,7 +221,7 @@ High-BDP paths (fibre, ~ 300 mbit) need `cap ≥ 1024` with reorder ON; 256 and 
 
 ### 4.3 Same sweep under `--scheduler minrtt`
 
-The same sweep with `minrtt` (lowest-SRTT path; spills to the other path only when cwnd-blocked). Each cell shows `OFF: <gp>` (`[Reorder] Enabled = off`) and `ON: <gp> @<wait>` (ON at the knee), with the higher value in bold. The Δ columns compare each scheduler's higher value with the better single path: positive means multipath wins, near zero means it matches while keeping multipath on, negative means the single path is faster. `cap = 1024` unless noted.
+The same sweep with `minrtt` (lowest-SRTT path; spills to the other path only when cwnd-blocked). Each cell shows `OFF: <gp>` (`[Reorder] Enabled = false`) and `ON: <gp> @<wait>` (ON at the knee), with the higher value in bold. The Δ columns compare each scheduler's higher value with the better single path: positive means multipath wins, near zero means it matches while keeping multipath on, negative means the single path is faster. `cap = 1024` unless noted.
 
 | env | spread [ms] | single [Mbps] | `wlb` [Mbps] | Δ `wlb` vs single [%] | `minrtt` [Mbps] | Δ `minrtt` vs single [%] | recommended config |
 |---|--:|--:|---|--:|---|--:|---|
@@ -264,22 +264,22 @@ The tree picks the scheduler and the reorder buffer state. It assumes multipath 
                                  wlb here would split onto the slow path and lose.)
 
 1. Asymmetric or spread ≥ ~ 100 ms (minrtt at step 0).
-     [Reorder] Enabled = off                                          ← default
+     [Reorder] Enabled = false                                        ← default
        envs: fiber_lte, rtt_120, lte_geo, rtt_320, bw_4to1, bw_10to1, lte_starlink
 
 2. Symmetric with jitter (per-path ≥ 5 ms) or spread ≤ 50 ms (wlb at step 0).
-     [Reorder] Enabled = on, MaxWaitMs = the §4.3 knee (10–80 ms; 200 ms under
+     [Reorder] Enabled = true, MaxWaitMs = the §4.3 knee (10–80 ms; 200 ms under
      20 ms jitter), CapPackets ≥ 1024
        envs: jit_5, jit_20, rtt_40, rtt_70, dual_lte, congested   (wlb OFF collapses
              to ~ 1 Mbps or never finishes here; see §4.1.A)
        envs: baseline (+11 %), loss_2 (+33 %)   (OFF already aggregates; ON adds this)
 
 3. Symmetric with per-path loss only (wlb at step 0).
-     [Reorder] Enabled = off                                          ← default
+     [Reorder] Enabled = false                                        ← default
        env: loss_05   (enabling the buffer is neutral, −1 %)
 ```
 
-The shipping defaults (`--scheduler wlb`, `[Reorder] Enabled = off`) fit step 3. Jittery or small-spread paths turn the buffer on (step 2); asymmetric or high-spread paths switch to `minrtt` (step 1). No environment in this sweep needed both schedulers at once.
+The shipping defaults (`--scheduler wlb`, `[Reorder] Enabled = false`) fit step 3. Jittery or small-spread paths turn the buffer on (step 2); asymmetric or high-spread paths switch to `minrtt` (step 1). No environment in this sweep needed both schedulers at once.
 
 ## 5. Conclusion
 

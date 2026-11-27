@@ -26,17 +26,10 @@ class MyVpnService : MqvpnVpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val configJson = intent?.getStringExtra(EXTRA_CONFIG_JSON)
-        val config = if (configJson != null) {
-            MqvpnConfig.fromJson(configJson)
-        } else {
-            restoreConfig()
-        } ?: run {
+        val config = resolveConfig(intent) ?: run {
             stopSelf()
             return START_NOT_STICKY
         }
-
-        persistConfig(config)
 
         startForeground(
             NOTIFICATION_ID,
@@ -106,35 +99,6 @@ class MyVpnService : MqvpnVpnService() {
         updateNotification("Reconnecting in ${delaySec}s...")
     }
 
-    override fun onDestroy() {
-        clearPersistedConfig()
-        super.onDestroy()
-    }
-
-    // --- Config persistence ---
-
-    private fun persistConfig(config: MqvpnConfig) {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-            .putString(KEY_CONFIG_JSON, config.toJson())
-            .apply()
-    }
-
-    private fun restoreConfig(): MqvpnConfig? {
-        val json = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getString(KEY_CONFIG_JSON, null) ?: return null
-        return try {
-            MqvpnConfig.fromJson(json)
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-    private fun clearPersistedConfig() {
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-            .remove(KEY_CONFIG_JSON)
-            .apply()
-    }
-
     // --- Notifications ---
 
     private fun createNotificationChannel() {
@@ -164,8 +128,5 @@ class MyVpnService : MqvpnVpnService() {
         private const val TAG = "MqvpnService"
         private const val CHANNEL_ID = "mqvpn_vpn"
         private const val NOTIFICATION_ID = 1
-        private const val PREFS_NAME = "mqvpn_service"
-        private const val KEY_CONFIG_JSON = "config_json"
-        private const val EXTRA_CONFIG_JSON = "mqvpn_config_json"
     }
 }

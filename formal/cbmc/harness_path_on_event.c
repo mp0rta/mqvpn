@@ -61,16 +61,6 @@ path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p)
     oracle_obs.fires++;
 }
 
-void
-client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
-                             int app_status)
-{
-    (void)c;
-    (void)p;
-    oracle_obs.notifies++;
-    oracle_obs.notify_status = app_status;
-}
-
 /* ─── Nondeterminism ─── */
 
 int nondet_int(void);
@@ -208,7 +198,7 @@ run_one(run_t *r, int ev, int ctx, int prefix)
     const int abs_defined =
         oracle_abs_post(&r->post, r->pre.xqc_path_id, r->new_id, &r->abs_post);
     assert(abs_defined);
-    assert(r->obs.fires <= 1 && r->obs.notifies <= 1);
+    assert(r->obs.fires <= 1);
     assert(oracle_conc_rule(&r->post));
     /* The whole invariant on every post-state, STABLE_TICK's included
      * (path_fsm_tick_confirm_stable does not check it itself), status among
@@ -255,8 +245,6 @@ harness(void)
     /* The theorem: same abstract pre-state -> same abstract result. */
     assert(oracle_slot_eq(&r1.abs_post, &r2.abs_post));
     assert(r1.obs.fires == r2.obs.fires);
-    assert(r1.obs.notifies == r2.obs.notifies);
-    assert(r1.obs.notifies == 0 || r1.obs.notify_status == r2.obs.notify_status);
 
     /* Update classes, under Dom item 8 only. */
     if (oracle_no_collision(&r1.pre, r1.now) && oracle_no_collision(&r2.pre, r2.now)) {
@@ -301,5 +289,5 @@ harness_null_ctx(void)
            p.last_residence_warn_at_us == before.last_residence_warn_at_us &&
            p.transport_ctx == before.transport_ctx && oracle_ops_eq(&p.ops, &before.ops));
     assert(oracle_frame_eq(&before, &p));
-    assert(oracle_obs.fires == 0 && oracle_obs.notifies == 0);
+    assert(oracle_obs.fires == 0);
 }

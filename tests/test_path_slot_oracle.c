@@ -8,8 +8,8 @@
  * every event/context class) it builds the canonical concrete slot, applies
  * the caller's own writes where the caller would, dispatches with a non-NULL
  * client token (which every accessor call must receive), and checks the
- * result against the row: the abstract post-state, the two observable calls
- * (public path event, xquic app-status mirror), how each timer and the retry
+ * result against the row: the abstract post-state, the observable call
+ * (public path event), how each timer and the retry
  * counter was updated, the state-entry stamp, the transport ops and ctx, the
  * concretization rule, the public status (the model's Projection of the
  * post-state, from the row), the residence-warn debounce, the frame (the
@@ -90,16 +90,6 @@ path_fsm_fire_path_event(struct mqvpn_client_s *c, const path_entry_t *p)
     note_client(c);
     (void)p;
     oracle_obs.fires++;
-}
-
-void
-client_notify_xqc_path_state(struct mqvpn_client_s *c, const path_entry_t *p,
-                             int app_status)
-{
-    note_client(c);
-    (void)p;
-    oracle_obs.notifies++;
-    oracle_obs.notify_status = app_status;
 }
 
 /* ─── Reporting ───
@@ -451,15 +441,6 @@ check_row(size_t i, const oracle_row_t *row)
                oracle_slot_eq(&got, &row->post),
            "abstract post-state");
     expect_eq(oracle_obs.fires, row->fires, "public path event");
-    const unsigned want_calls = row->notify ? 1 : 0;
-    if (oracle_obs.notifies != want_calls ||
-        (want_calls && oracle_obs.notify_status != row->notify)) {
-        char d[128];
-        snprintf(d, sizeof(d),
-                 "got %u call(s), app_status %d; want %u call(s), app_status %u",
-                 oracle_obs.notifies, oracle_obs.notify_status, want_calls, row->notify);
-        fail_row("xquic app-status mirror", d);
-    }
     expect_upd(oracle_retry_class(&pre, &p, now), row->retry_upd,
                "recreate_after_us update");
     expect_upd(oracle_stable_class(&pre, &p, now), row->stable_upd,

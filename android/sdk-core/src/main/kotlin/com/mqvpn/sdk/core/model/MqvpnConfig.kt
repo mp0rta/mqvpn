@@ -37,6 +37,8 @@ data class MqvpnConfig(
     val scheduler: Scheduler = Scheduler.MIN_RTT,
     /** Ask the server to use [scheduler] for this connection (it may refuse). */
     val requestServerScheduler: Boolean = false,
+    /** Congestion control for what this client sends; the server keeps its own for downloads. */
+    val cc: CongestionControl = CongestionControl.BBR2,
     /**
      * Minimum level of the library's log lines: this tunnel's own lines,
      * delivered to `MqvpnVpnService.onLog`, and the lines the library writes
@@ -52,15 +54,50 @@ data class MqvpnConfig(
     val reorderEnabled: Boolean = false,
     val reorderProfile: ReorderProfile = ReorderProfile.CELLULAR_BOND,
     val reorderPorts: List<Int> = emptyList(),
+    /** Send each UDP packet over every path at once (uplink). */
+    val redundantEnabled: Boolean = false,
+    /** Destination ports to duplicate; empty = all UDP. */
+    val redundantPorts: List<Int> = emptyList(),
     val hybridEnabled: Boolean = false,
     val hybridTcpMode: HybridTcpMode = HybridTcpMode.AUTO,
     /**
-     * Keep a Bluetooth-tethered network connected as a path next to the
-     * others. Wi-Fi, cellular and Ethernet are always kept. With `false`,
-     * Bluetooth is a path only when Android connects it on its own, which it
-     * normally does not do while Wi-Fi or Ethernet is connected.
+     * Use a Bluetooth-tethered network as a path, and keep it connected next
+     * to the others. With `false` a Bluetooth network is never a path, even
+     * when Android connects it on its own.
      */
     val bluetoothPathEnabled: Boolean = false,
+    /**
+     * Largest IP packet the network carries (1280-9000), to size QUIC packets
+     * for; 0 = the default packet size. With [pmtud] it is the upper limit.
+     */
+    val pathMtu: Int = 0,
+    /**
+     * Discover the path MTU: packets start at a size every path carries and
+     * grow while larger probes get through, and go back down if the path
+     * gets smaller. The server must enable it too. Android sets the TUN MTU
+     * once, when the tunnel comes up, so it stays at 1280 here: the tunnel
+     * survives a path that gets smaller, but uploads do not use a larger
+     * discovered size.
+     */
+    val pmtud: Boolean = false,
+    // Appended fields only below this line: callers may construct positionally.
+    /** Use Wi-Fi networks as paths. Fixed when the tunnel starts. */
+    val wifiPathEnabled: Boolean = true,
+    /** Use cellular networks as paths. Fixed when the tunnel starts. */
+    val cellularPathEnabled: Boolean = true,
+    /** Use Ethernet networks as paths. Fixed when the tunnel starts. */
+    val ethernetPathEnabled: Boolean = true,
+    /**
+     * Wi-Fi networks join as backup paths under [Scheduler.FAILOVER], used
+     * only while no other path works. Fixed when the tunnel starts.
+     */
+    val wifiPathBackup: Boolean = false,
+    /** Cellular networks are backups; see [wifiPathBackup]. */
+    val cellularPathBackup: Boolean = true,
+    /** Ethernet networks are backups; see [wifiPathBackup]. */
+    val ethernetPathBackup: Boolean = false,
+    /** Bluetooth networks are backups; see [wifiPathBackup]. */
+    val bluetoothPathBackup: Boolean = false,
 ) : Parcelable {
 
     @Serializable
@@ -69,6 +106,16 @@ data class MqvpnConfig(
         WLB(1),
         BACKUP_FEC(2),
         WLB_UDP_PIN(3),
+
+        /** One path carries the traffic; networks marked as backups (cellular by default) are used only while no other path works. */
+        FAILOVER(4),
+    }
+
+    @Serializable
+    enum class CongestionControl(val native: Int) {
+        BBR2(0),
+        BBR(1),
+        CUBIC(2),
     }
 
     @Serializable

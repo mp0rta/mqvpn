@@ -25,7 +25,7 @@ typedef struct mqvpn_server_cfg_s {
     const char *key_file;       /* TLS private key path */
     int log_level;              /* mqvpn_log_level_t */
     int allow_client_scheduler; /* 1=honour a client scheduler request (default 0) */
-    int scheduler;        /* 0=minrtt, 1=wlb (default), 2=backup_fec, 3=wlb_udp_pin */
+    int scheduler;        /* mqvpn_scheduler_t; 0=minrtt, 1=wlb (default), 4=failover */
     const char *auth_key; /* PSK for client authentication (NULL = no auth) */
     const char *user_names[64];
     const char *user_keys[64];
@@ -35,17 +35,23 @@ typedef struct mqvpn_server_cfg_s {
     const char *control_addr;  /* bind address for JSON control API (default 127.0.0.1) */
     int control_port;          /* TCP port for JSON control API (0 = disabled) */
     uint64_t init_max_path_id; /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
-    int tun_mtu;               /* 0=auto (1382 at startup), >0=override (floor 1280) */
-    int cc;                    /* mqvpn_cc_t: congestion control algorithm */
-    int reinjection;           /* mqvpn_reinjection_t; 0=off (default) */
-    int reinj_srtt_factor_pct; /* deadline mode; percent, e.g. 110 = 1.10x srtt */
-    int reinj_hard_deadline_ms;        /* deadline mode */
+    int bbr2_fast_convergence; /* [Multipath] Bbr2FastConvergence; default 1 */
+    int bbr2_rttvar_compensation; /* [Multipath] Bbr2RttvarCompensation; default 1 */
+    int tun_mtu;                  /* 0=auto (1382 at startup), >0=override (floor 1280) */
+    int path_mtu;                 /* 0=default packet size, >0=underlay MTU */
+    int pmtud;                    /* 1=discover the path MTU, path_mtu is the cap */
+    int cc;                       /* mqvpn_cc_t: congestion control algorithm */
+    int reinjection;              /* mqvpn_reinjection_t; 0=off (default) */
+    int reinj_srtt_factor_pct;    /* deadline mode; percent, e.g. 110 = 1.10x srtt */
+    int reinj_hard_deadline_ms;   /* deadline mode */
     int reinj_deadline_lower_bound_ms; /* deadline mode */
     mqvpn_reorder_config_t
         reorder;                  /* INI [Reorder]/[ReorderRule] (mode OFF by default) */
     mqvpn_hybrid_config_t hybrid; /* INI [Hybrid] (disabled by default) */
     int udp_gso;                  /* [Advanced] UdpGso; default 1 */
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
+    int tun_offload;              /* [Advanced] TunOffload; default 1 */
+    int tun_gro;                  /* [Advanced] TunGro; default 1 */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

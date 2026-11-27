@@ -35,6 +35,7 @@
     X(MQVPN_SCHED_MINRTT, "minrtt")         \
     X(MQVPN_SCHED_WLB, "wlb")               \
     X(MQVPN_SCHED_BACKUP_FEC, "backup_fec") \
+    X(MQVPN_SCHED_FAILOVER, "failover")     \
     X(MQVPN_SCHED_WLB_UDP_PIN, "wlb_udp_pin")
 
 #define MQVPN_CC_LIST(X)       \
@@ -46,8 +47,7 @@
 #define MQVPN_REINJ_LIST(X)             \
     X(MQVPN_REINJ_OFF, "off")           \
     X(MQVPN_REINJ_DEADLINE, "deadline") \
-    X(MQVPN_REINJ_IDLE, "idle")         \
-    X(MQVPN_REINJ_DGRAM, "dgram")
+    X(MQVPN_REINJ_IDLE, "idle")
 
 /* mqvpn_sched_from_name: returns the enum value, or -1 if unrecognized. */
 static inline int

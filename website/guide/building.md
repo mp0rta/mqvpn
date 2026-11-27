@@ -5,11 +5,20 @@
 ### Requirements
 
 - Git
-- CMake 3.10+
+- CMake 3.22+
 - GNU Make
 - GCC or Clang (C11)
 - libevent 2.x
 - Network access to fetch submodules (`git submodule update --init --recursive`, which includes BoringSSL)
+
+On Debian and Ubuntu, `packaging/build-deps.control` lists the build dependencies, including the tools that build the deb packages:
+
+```bash
+# Debian/Ubuntu: install the build dependencies (packaging/build-deps.control)
+sudo apt-get satisfy "$(sed -n 's/^Build-Depends: *//p' packaging/build-deps.control)"   # from the repository root
+# or, with devscripts and equivs installed:
+sudo mk-build-deps --install --remove packaging/build-deps.control
+```
 
 ### Quick Build
 
@@ -25,7 +34,8 @@
 ```bash
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
 cd ../../../../..
 ```
@@ -75,7 +85,7 @@ Only the client is supported on Windows. The server is Linux-only.
 | Tool | Purpose | Install |
 |------|---------|---------|
 | Visual Studio 2022 Build Tools | C/C++ compiler (MSVC) | `winget install Microsoft.VisualStudio.2022.BuildTools` (select C++ workload) |
-| CMake >= 3.10 | Build system | `winget install Kitware.CMake` |
+| CMake >= 3.22 | Build system | `winget install Kitware.CMake` |
 | Go | Required by BoringSSL | `winget install GoLang.Go` |
 | NASM | Required by BoringSSL (assembly) | `winget install NASM.NASM` |
 | Perl (Strawberry Perl) | Required by BoringSSL | `winget install StrawberryPerl.StrawberryPerl` |
@@ -199,7 +209,7 @@ android/
 ## iOS
 
 ::: info
-iOS support is client-only and in development: the app and PacketTunnel extension live under `ios/poc/`. CI cross-builds the full chain and compiles the app unsigned; running on a device requires your own signing identity.
+iOS support is client-only and in development: the app and PacketTunnel extension live under `ios/app/`. CI cross-builds the full chain and compiles the app unsigned; running on a device requires your own signing identity.
 :::
 
 ### Prerequisites
@@ -221,10 +231,10 @@ The script builds everything for `iphoneos`/arm64 with deployment target 15.0, e
 ### Build the app and PacketTunnel extension
 
 ```bash
-bash ios/poc/Tests/run-host-tests.sh                         # Swift host tests (no SDK required)
+bash ios/app/Tests/run-host-tests.sh                         # Swift host tests (no SDK required)
 
-cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # set your DEVELOPMENT_TEAM
-(cd ios/poc && xcodegen generate)                            # generate the Xcode project
+cp ios/app/Config.example.xcconfig ios/app/Config.xcconfig   # set your DEVELOPMENT_TEAM
+(cd ios/app && xcodegen generate)                            # generate the Xcode project
 ```
 
 CI builds the same project unsigned (`CODE_SIGNING_ALLOWED=NO`); device and simulator execution remain a manual step.

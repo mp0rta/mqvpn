@@ -5,6 +5,7 @@
 #
 # Usage: source sanitizer_check.sh
 #        stop_and_check_sanitizer PID "description" [log_file]
+#        check_closed_exit PID "description" log_file
 #
 # Sends SIGTERM, waits, checks exit code. ASan/UBSan cause non-zero exit.
 # Exit code 1 = sanitizer error detected.
@@ -38,6 +39,29 @@ _check_residence_warnings() {
             return 1
         fi
     fi
+    return 0
+}
+
+# A client that reached CLOSED on its own (no reconnect) exits 1 with
+# "exiting: connection closed" by design, and ASan/UBSan exit 1 too, so the
+# status alone tells them apart from nothing: reap it and check for both.
+# Callers clear their PID afterwards so stop_and_check_sanitizer in cleanup
+# does not wait it again (bash would hand back the same status 1).
+_SANITIZER_RE='ERROR: (Address|Leak|Memory|Thread)Sanitizer|runtime error:|SUMMARY: (Address|Leak|Memory|Thread|Undefined)'
+
+check_closed_exit() {
+    local pid="$1" desc="$2" log_file="$3"
+    local rc=0
+
+    wait "$pid" 2>/dev/null || rc=$?
+    if [ $rc -ne 1 ] || ! grep -q "exiting: connection closed" "$log_file" \
+        || grep -qE "$_SANITIZER_RE" "$log_file"; then
+        echo "FAIL: $desc (PID $pid) exited with code $rc, want 1 with" \
+            "'exiting: connection closed' and no sanitizer report"
+        _dump_sanitizer_log "$desc" "$log_file"
+        return 1
+    fi
+    _check_residence_warnings "$desc" "$log_file" || return 1
     return 0
 }
 

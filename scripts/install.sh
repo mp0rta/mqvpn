@@ -212,6 +212,14 @@ grep -F "  ${TARBALL}" SHA256SUMS | sha256sum -c --quiet --strict \
     || err "Checksum verification failed"
 tar xzf "$TARBALL"
 
+# Check the binary's shared libraries before placing any file: a minimal
+# image may lack libevent. "|| true": an ldd failure or no match must not
+# trip set -e / pipefail; only the captured "not found" lines decide.
+missing=$(LD_LIBRARY_PATH="$WORK_DIR/lib" ldd bin/mqvpn 2>&1 | grep 'not found' || true)
+[ -z "$missing" ] || err "Missing shared libraries:
+$missing
+Install them first (libevent: apt-get install libevent-2.1-7t64, or libevent-2.1-7 on older releases)"
+
 install -m 755 bin/mqvpn "$INSTALL_PREFIX/bin/mqvpn"
 shopt -s nullglob
 libmqvpn_files=(lib/libmqvpn.so.*)
@@ -222,6 +230,7 @@ fi
 install -m 644 lib/libxquic.so "$INSTALL_PREFIX/lib/"
 mkdir -p "$INSTALL_PREFIX/lib/mqvpn"
 install -m 755 lib/mqvpn/mqvpn-server-nat.sh "$INSTALL_PREFIX/lib/mqvpn/"
+install -m 755 lib/mqvpn/mqvpn-nat-config "$INSTALL_PREFIX/lib/mqvpn/"
 install -m 644 systemd/mqvpn-server.service /lib/systemd/system/
 install -m 644 systemd/mqvpn-client@.service /lib/systemd/system/
 
@@ -299,6 +308,15 @@ if [ ! -f /etc/mqvpn/server.conf ]; then
         echo
         echo "[Multipath]"
         echo "Scheduler = wlb"
+        echo "AllowClientScheduler = true"
+        echo
+        # Server side only offers these; each takes effect for a client that
+        # also enables it.
+        echo "[Hybrid]"
+        echo "Enabled = true"
+        echo
+        echo "[Reorder]"
+        echo "Enabled = true"
         echo
         if [ "$ENABLE_CONTROL" -eq 1 ]; then
             echo "[Control]"

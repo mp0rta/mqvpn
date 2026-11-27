@@ -13,6 +13,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.mqvpn.app.data.DemoSettings
 import com.mqvpn.app.data.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
@@ -90,9 +91,16 @@ class SettingsRepositoryTest {
             reorderEnabled = true,
             reorderProfile = "FIBER_LTE",
             reorderPorts = "443,8443",
+            redundantEnabled = true,
+            redundantPorts = "4200,9000",
             hybridEnabled = true,
             hybridTcpMode = "RAW",
             bluetoothPathEnabled = true,
+            pathWifi = false,
+            pathCellular = false,
+            pathEthernet = false,
+            backupPaths = setOf("WIFI", "ETHERNET"),
+            autoReconnect = false,
             scheduler = "WLB",
         )
 
@@ -115,6 +123,26 @@ class SettingsRepositoryTest {
 
         val expected = DemoSettings(serverAddress = "198.51.100.9", serverPort = 51820)
         assertEquals(expected, result)
+    }
+
+    @Test
+    fun `backup paths without the key are cellular`() = runTest(testDispatcher) {
+        val repo = SettingsRepository(newDataStore(newFile()))
+        assertEquals(setOf("CELLULAR"), repo.settings.first().backupPaths)
+    }
+
+    @Test
+    fun `an empty backup set stays empty`() = runTest(testDispatcher) {
+        val repo = SettingsRepository(newDataStore(newFile()))
+        repo.save(DemoSettings(backupPaths = emptySet()))
+        assertEquals(emptySet<String>(), repo.settings.first().backupPaths)
+    }
+
+    @Test
+    fun `a backup path name this build does not know stays as stored`() = runTest(testDispatcher) {
+        val store = newDataStore(newFile())
+        store.edit { it[stringSetPreferencesKey("backup_paths")] = setOf("WIFI", "NOPE") }
+        assertEquals(setOf("WIFI", "NOPE"), SettingsRepository(store).settings.first().backupPaths)
     }
 
     @Test
@@ -206,9 +234,16 @@ class SettingsRepositoryTest {
             reorderEnabled = true,
             reorderProfile = "FIBER_LTE",
             reorderPorts = "443,8443",
+            redundantEnabled = true,
+            redundantPorts = "4200,9000",
             hybridEnabled = true,
             hybridTcpMode = "RAW",
             bluetoothPathEnabled = true,
+            pathWifi = false,
+            pathCellular = false,
+            pathEthernet = false,
+            backupPaths = setOf("WIFI", "ETHERNET"),
+            autoReconnect = false,
             scheduler = "WLB",
         )
 

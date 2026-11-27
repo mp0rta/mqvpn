@@ -2,7 +2,7 @@
 // Copyright (c) 2026 mp0rta and mqvpn contributors
 
 /* libFuzzer target: control-API request bytes -> dispatch() -> JSON command
- * parsing (json_mini.h) + per-command argument extraction + error-response
+ * parsing (yyjson) + per-command argument extraction + error-response
  * building.
  *
  * Scope: the control socket accepts TCP connections (127.0.0.1 by default,

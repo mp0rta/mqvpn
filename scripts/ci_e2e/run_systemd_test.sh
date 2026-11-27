@@ -46,7 +46,8 @@ echo "OK: systemd available"
 for f in /usr/local/bin/mqvpn \
          /usr/local/lib/systemd/system/mqvpn-server.service \
          /usr/local/lib/systemd/system/mqvpn-client@.service \
-         /usr/local/lib/mqvpn/mqvpn-server-nat.sh; do
+         /usr/local/lib/mqvpn/mqvpn-server-nat.sh \
+         /usr/local/lib/mqvpn/mqvpn-nat-config; do
     if [ ! -f "$f" ]; then
         echo "FAIL: $f not found — run: cd build && sudo cmake --install . --prefix /usr/local"
         exit 1

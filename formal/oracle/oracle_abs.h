@@ -173,7 +173,6 @@ typedef struct {
     oracle_slot_t post;
     uint8_t status; /* mqvpn_path_status_t of post: the model's Projection */
     uint8_t fires;  /* path_fsm_fire_path_event called */
-    uint8_t notify; /* client_notify_xqc_path_state app_status, 0 = not called */
     uint8_t retry_upd;
     uint8_t stable_upd;
     uint8_t retries_upd;
@@ -184,8 +183,6 @@ typedef struct {
 /* What the consumer's accessor stubs observed during one dispatch. */
 typedef struct {
     unsigned fires;
-    unsigned notifies;
-    int notify_status;
 } oracle_obs_t;
 extern oracle_obs_t oracle_obs;
 

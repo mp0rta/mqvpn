@@ -82,7 +82,7 @@ echo "[hybrid-h1] N=$N_PATHS binary=$MQVPN inner-tcp-port=$INNER_TCP_PORT"
 bench_check_test_deps nc
 
 # ── Phase INIs. Keys cross-checked against src/config.c cfg_keys[]:
-#    [Hybrid] Enabled true|false -> CFG_BOOL (parse_bool: true/yes/1)
+#    [Hybrid] Enabled true|false -> CFG_BOOL (true/false only)
 #    [Hybrid] Tcp stream|raw|auto -> parse_hybrid_tcp_mode
 cat >"$INI_P1" <<EOF
 [Hybrid]
@@ -105,8 +105,7 @@ EOF
 bench_setup_netns_n "$N_PATHS"
 bench_add_server_host_routes "$N_PATHS"
 
-# Parameterized wait_for_log (adapted from tests/test_e2e_dellink.sh, which
-# greps a hardcoded global log — here each phase has its own log file).
+# Parameterized wait_for_log: each phase has its own log file.
 # $1 = log file, $2 = grep -E pattern, $3 = timeout seconds (default 40).
 wait_for_log() {
     local logfile="$1"

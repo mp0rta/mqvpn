@@ -49,11 +49,14 @@ object NativeBridge {
     /** mqvpn_config_set_insecure(cfg, insecure) */
     external fun configSetInsecure(cfg: Long, insecure: Boolean): Int
 
-    /** mqvpn_config_set_scheduler(cfg, scheduler: 0=MINRTT, 1=WLB, 2=BACKUP_FEC, 3=WLB_UDP_PIN) */
+    /** mqvpn_config_set_scheduler(cfg, scheduler: 0=MINRTT, 1=WLB, 2=BACKUP_FEC, 3=WLB_UDP_PIN, 4=FAILOVER) */
     external fun configSetScheduler(cfg: Long, scheduler: Int): Int
 
     /** mqvpn_config_set_request_server_scheduler(cfg, enable) */
     external fun configSetRequestServerScheduler(cfg: Long, enable: Boolean): Int
+
+    /** mqvpn_config_set_cc(cfg, cc: 0=BBR2, 1=BBR, 2=CUBIC) */
+    external fun configSetCc(cfg: Long, cc: Int): Int
 
     /**
      * mqvpn_config_set_log_level(cfg, level: 0=DEBUG..3=ERROR). On success it
@@ -85,8 +88,17 @@ object NativeBridge {
     /** mqvpn_config_set_killswitch_hint(cfg, enable) */
     external fun configSetKillswitchHint(cfg: Long, enable: Boolean): Int
 
+    /** mqvpn_config_set_path_mtu(cfg, mtu): 0 or 1280-9000 */
+    external fun configSetPathMtu(cfg: Long, mtu: Int): Int
+
+    /** mqvpn_config_set_pmtud(cfg, enable) */
+    external fun configSetPmtud(cfg: Long, enable: Boolean): Int
+
     /** mqvpn_config_set_reorder_enabled(cfg, mode: 0=OFF, 1=ON) */
     external fun configSetReorderEnabled(cfg: Long, mode: Int): Int
+
+    /** mqvpn_config_set_redundant(cfg, enabled, ports); empty ports = all UDP. */
+    external fun configSetRedundant(cfg: Long, enabled: Boolean, ports: IntArray): Int
 
     /** mqvpn_config_add_reorder_rule(cfg, proto, port, profile) */
     external fun configAddReorderRule(cfg: Long, proto: Int, port: Int, profile: Int): Int
@@ -178,8 +190,9 @@ object NativeBridge {
      * Wraps [fd] in a bundled POSIX bind and registers it with
      * mqvpn_client_add_path() → path handle (>= 0), or -1 with the fd
      * untouched (the caller closes it). The fd is borrowed: never closed here.
+     * [flags] = mqvpn_path_desc_t.flags ([PATH_FLAG_BACKUP]).
      */
-    external fun reactorAddPath(reactor: Long, client: Long, fd: Int, iface: String): Long
+    external fun reactorAddPath(reactor: Long, client: Long, fd: Int, iface: String, flags: Int): Long
 
     /**
      * mqvpn_client_remove_path() + stop polling the fd. Returns the library's
@@ -204,6 +217,9 @@ object NativeBridge {
      * The [client] handle is invalid afterwards.
      */
     external fun reactorClientDestroy(reactor: Long, client: Long)
+
+    /** [reactorAddPath] flag: a backup path (MQVPN_PATH_FLAG_BACKUP). */
+    const val PATH_FLAG_BACKUP: Int = 1
 
     /** Returned by [reactorPathReleased] on ledger corruption (MQVPN_REACTOR_POISONED). */
     const val REACTOR_POISONED: Int = -100

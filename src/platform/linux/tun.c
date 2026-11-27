@@ -44,29 +44,8 @@ struct mqvpn_tun_offload {
     uint64_t csum_pkts;         /* plain packets whose checksum we finished */
     uint64_t drops;             /* malformed vnet packets dropped */
     int fd;                     /* the TUN, for the GRO emit callback */
-    mqvpn_gro_t *gro;           /* write-side TCP GRO, NULL when off */
+    mqvpn_gro_t *gro;           /* write-side TCP/UDP GRO, NULL when off */
 };
-
-static int
-env_off(const char *name)
-{
-    const char *e = getenv(name);
-    return e && (strcmp(e, "0") == 0 || strcmp(e, "off") == 0);
-}
-
-/* MQVPN_TUN_OFFLOAD=0 (or "off") keeps the plain one-packet-per-read TUN. */
-static int
-tun_offload_wanted(void)
-{
-    return !env_off("MQVPN_TUN_OFFLOAD");
-}
-
-/* MQVPN_TUN_GRO=0 keeps the offloaded reads but writes packets one by one. */
-static int
-tun_gro_wanted(void)
-{
-    return !env_off("MQVPN_TUN_GRO");
-}
 
 /* GRO sink: one packet (or one coalesced super-packet) to the TUN. */
 static int
@@ -74,10 +53,13 @@ tun_gro_emit(void *ctx, const struct virtio_net_hdr *vh, const uint8_t *pkt, siz
 {
     struct mqvpn_tun_offload *off = ctx;
     struct iovec iov[2] = {{(void *)vh, sizeof(*vh)}, {(void *)pkt, len}};
-    ssize_t n = writev(off->fd, iov, 2);
-    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
-        LOG_ERR("tun write: %s", strerror(errno));
-    return n < 0 ? -1 : 0;
+    if (writev(off->fd, iov, 2) >= 0) return 0;
+    int err = errno;
+    if (err == EINVAL && vh->gso_type == VIRTIO_NET_HDR_GSO_UDP_L4)
+        LOG_WRN("tun write: UDP GSO packet refused, writing UDP datagrams one by one");
+    else if (err != EAGAIN && err != EWOULDBLOCK)
+        LOG_ERR("tun write: %s", strerror(err));
+    return -err;
 }
 
 /*
@@ -109,8 +91,7 @@ tun_enable_offloads(int fd, unsigned int *flags_out)
 
 /* Open /dev/net/tun and attach it to dev_name. With vnet set, request the
  * virtio header and enable the offloads; returns -1 if any step fails so the
- * caller can fall back to a plain TUN. quiet suppresses the error logs of the
- * vnet attempt. */
+ * caller can fall back to a plain TUN. */
 static int
 tun_open(const char *name_buf, int vnet, struct ifreq *ifr, unsigned int *off_flags)
 {
@@ -143,6 +124,12 @@ tun_open(const char *name_buf, int vnet, struct ifreq *ifr, unsigned int *off_fl
 int
 mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 {
+    return mqvpn_tun_create_opts(tun, dev_name, 1, 1);
+}
+
+int
+mqvpn_tun_create_opts(mqvpn_tun_t *tun, const char *dev_name, int offload, int gro)
+{
     /* Copy dev_name before memset — caller may pass tun->name which aliases tun */
     char name_buf[IFNAMSIZ] = "";
     if (dev_name && dev_name[0]) snprintf(name_buf, sizeof(name_buf), "%s", dev_name);
@@ -157,7 +144,7 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
 
     /* Prefer a TUN with the virtio header and TSO/USO offloads; if the
      * kernel refuses any part of it, fall back to the plain TUN. */
-    if (tun_offload_wanted()) {
+    if (offload) {
         off = calloc(1, sizeof(*off));
         if (off) fd = tun_open(name_buf, 1, &ifr, &off_flags);
         if (fd < 0) {
@@ -182,16 +169,35 @@ mqvpn_tun_create(mqvpn_tun_t *tun, const char *dev_name)
     tun->offload = off;
     if (off) {
         off->fd = fd;
-        if (tun_gro_wanted()) off->gro = mqvpn_gro_new(tun_gro_emit, off);
+        if (gro) off->gro = mqvpn_gro_new(tun_gro_emit, off);
+        /* UDP datagrams are merged into USO packets, which the kernel takes
+         * from the TUN only when it took the USO offload flags. */
+        if (off->gro)
+            mqvpn_gro_set_udp(off->gro, (off_flags & TUN_F_USO4) != 0,
+                              (off_flags & TUN_F_USO6) != 0);
     }
     strncpy(tun->name, ifr.ifr_name, IFNAMSIZ - 1);
     tun->name[IFNAMSIZ - 1] = '\0';
     if (off)
-        LOG_INF("TUN device %s created (fd=%d, offloads: csum tso4 tso6%s)", tun->name,
-                tun->fd, (off_flags & TUN_F_USO4) ? " uso4 uso6" : "");
+        LOG_INF("TUN device %s created (fd=%d, offloads: csum tso4 tso6%s%s)", tun->name,
+                tun->fd, (off_flags & TUN_F_USO4) ? " uso4 uso6" : "",
+                off->gro ? " gro" : "");
     else
         LOG_INF("TUN device %s created (fd=%d)", tun->name, tun->fd);
     return 0;
+}
+
+/*
+ * Write a value to a procfs sysctl path (best-effort).
+ */
+static int
+tun_write_proc(const char *path, const char *value)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return -1;
+    ssize_t n = write(fd, value, strlen(value));
+    close(fd);
+    return (n > 0) ? 0 : -1;
 }
 
 int
@@ -250,6 +256,18 @@ mqvpn_tun_set_addr(mqvpn_tun_t *tun, const char *addr, const char *peer_addr,
     }
 
     close(sock);
+
+    /* ICMP errors for forwarded packets (Fragmentation Needed, Time Exceeded,
+     * Dest Unreachable) are written to the TUN with this address as source.
+     * Linux drops an arriving IPv4 packet whose source is a local address
+     * unless accept_local is set, so without it they never reach the sender. */
+    char path[128];
+    snprintf(path, sizeof(path), "/proc/sys/net/ipv4/conf/%s/accept_local", tun->name);
+    if (tun_write_proc(path, "1") < 0)
+        LOG_WRN("TUN %s: cannot set accept_local, ICMP errors to forwarded traffic "
+                "will be dropped",
+                tun->name);
+
     LOG_INF("TUN %s: addr=%s peer=%s/%d", tun->name, addr, peer_addr, prefix_len);
     return 0;
 }
@@ -421,19 +439,6 @@ tun_netlink_add_addr6(unsigned int ifindex, const struct in6_addr *addr, int pre
     /* Return the negated errno (kernel sends negative errno) */
     errno = -nlerr->error;
     return -1;
-}
-
-/*
- * Write a value to a procfs sysctl path (best-effort).
- */
-static int
-tun_write_proc(const char *path, const char *value)
-{
-    int fd = open(path, O_WRONLY);
-    if (fd < 0) return -1;
-    ssize_t n = write(fd, value, strlen(value));
-    close(fd);
-    return (n > 0) ? 0 : -1;
 }
 
 int
@@ -631,12 +636,6 @@ mqvpn_tun_flush(mqvpn_tun_t *tun)
         mqvpn_gro_flush(tun->offload->gro);
 }
 
-int
-mqvpn_tun_gro_pending(const mqvpn_tun_t *tun)
-{
-    return tun->offload && tun->offload->gro && mqvpn_gro_pending(tun->offload->gro);
-}
-
 void
 mqvpn_tun_destroy(mqvpn_tun_t *tun)
 {
@@ -644,11 +643,14 @@ mqvpn_tun_destroy(mqvpn_tun_t *tun)
         if (tun->offload->gro) {
             uint64_t pushed, supers, merged, acks;
             if (tun->fd >= 0) mqvpn_gro_flush(tun->offload->gro);
+            uint64_t usupers, umerged;
             mqvpn_gro_stats(tun->offload->gro, &pushed, &supers, &merged, &acks);
+            mqvpn_gro_udp_stats(tun->offload->gro, &usupers, &umerged);
             LOG_INF("TUN %s: GRO: %llu packets written, %llu super-packets from %llu "
-                    "of them, %llu ACKs superseded",
+                    "of them (UDP: %llu from %llu), %llu ACKs superseded",
                     tun->name, (unsigned long long)pushed, (unsigned long long)supers,
-                    (unsigned long long)merged, (unsigned long long)acks);
+                    (unsigned long long)merged, (unsigned long long)usupers,
+                    (unsigned long long)umerged, (unsigned long long)acks);
             mqvpn_gro_free(tun->offload->gro);
         }
         LOG_INF("TUN %s: offload stats: %llu GSO packets split into %llu segments, %llu "

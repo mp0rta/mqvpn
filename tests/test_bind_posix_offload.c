@@ -34,7 +34,8 @@ iv(size_t len)
 }
 
 /* --- seam control -------------------------------------------------- */
-static int seam_fail_call; /* 1-based syscall index to fail; 0 = never */
+static int seam_fail_call;  /* 1-based syscall index to fail; 0 = never */
+static int seam_fail_call2; /* a second one, same errno */
 static int seam_fail_errno;
 static int seam_mmsg_partial; /* if >0, sendmmsg reports only this many */
 static int seam_calls;
@@ -72,7 +73,7 @@ mqvpn_seam_sendmsg(int fd, const struct msghdr *msg, int flags)
         assert(seam_last_seg == msg->msg_iov[0].iov_len);
         seam_last_was_gso = 1;
     }
-    if (seam_fail_call == seam_calls) {
+    if (seam_fail_call == seam_calls || seam_fail_call2 == seam_calls) {
         errno = seam_fail_errno;
         return -1;
     }
@@ -115,7 +116,7 @@ static void
 seam_reset(void)
 {
     memset(seam_ops, 0, sizeof(seam_ops));
-    seam_fail_call = seam_fail_errno = seam_mmsg_partial = 0;
+    seam_fail_call = seam_fail_call2 = seam_fail_errno = seam_mmsg_partial = 0;
     seam_calls = seam_last_was_gso = 0;
     seam_last_seg = 0;
     seam_bytes = 0;
@@ -358,7 +359,9 @@ test_gso_error_emsgsize_resends(void)
      * the route's cached PMTU, while the same datagrams without the cmsg
      * are locally fragmented and delivered. Without this classification the
      * engine retried the failing burst forever (uplink collapsed to ~1
-     * Mbps); with it, the sticky sendmmsg fallback restores delivery. */
+     * Mbps); with it, the sticky sendmmsg fallback restores delivery. The
+     * failed run is resent one datagram at a time: all of them get through,
+     * so it was GSO that failed. */
     seam_reset();
     struct iovec iov[4] = {iv(1400), iv(1400), iv(1400), iv(1400)};
     struct sockaddr_in peer;
@@ -373,10 +376,61 @@ test_gso_error_emsgsize_resends(void)
                                      &sticky, &tx);
     assert(r == 4);
     assert(sticky == EMSGSIZE);
-    assert(seam_ops[0] == 'm' && seam_ops[1] == 'M');
-    assert(tx.sends == 1);
+    assert(strcmp(seam_ops, "mmmmm") == 0);
+    assert(tx.sends == 4);
     assert(tx.datagrams == 4);
     printf("test_gso_error_emsgsize_resends OK\n");
+}
+
+static void
+test_gso_error_emsgsize_df_drops(void)
+{
+    /* With DF set (PMTUD), the run fails because one datagram, a probe, is
+     * larger than the interface allows. Sent one by one, that datagram
+     * fails alone: it is dropped (counted as sent, a lost packet for QUIC),
+     * the other goes out, and GSO stays on. */
+    seam_reset();
+    struct iovec iov[2] = {iv(1500), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(4433);
+    int sticky = 0;
+    mqvpn_tx_counters_t tx = {0};
+    seam_fail_call = 1;  /* the GSO run */
+    seam_fail_call2 = 2; /* the 1500-byte datagram alone */
+    seam_fail_errno = EMSGSIZE;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 2, (struct sockaddr *)&peer, sizeof peer, 1,
+                                     &sticky, &tx);
+    assert(r == 2);
+    assert(sticky == 0);
+    assert(strcmp(seam_ops, "mmm") == 0);
+    assert(tx.sends == 1);
+    assert(tx.datagrams == 1);
+    assert(tx.bytes == 1400u);
+    printf("test_gso_error_emsgsize_df_drops OK\n");
+}
+
+static void
+test_single_emsgsize_drops(void)
+{
+    /* a single datagram too large for the interface with DF set: dropped,
+     * not a send error that would close the connection */
+    seam_reset();
+    struct iovec iov[2] = {iv(1500), iv(1400)};
+    struct sockaddr_in peer;
+    memset(&peer, 0, sizeof peer);
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(4433);
+    int sticky = 0;
+    mqvpn_tx_counters_t tx = {0};
+    seam_fail_call = 1;
+    seam_fail_errno = EMSGSIZE;
+    ssize_t r = mqvpn_udp_send_batch(3, iov, 2, (struct sockaddr *)&peer, sizeof peer, 0,
+                                     &sticky, &tx);
+    assert(r == 1);
+    assert(sticky == 0);
+    printf("test_single_emsgsize_drops OK\n");
 }
 
 static void
@@ -805,6 +859,9 @@ static int rx_cmsg_level;
 static int rx_cmsg_type;
 static socklen_t rx_cmsg_len; /* 0 = the correct CMSG_LEN(sizeof(int)) */
 static int rx_cmsg_val;
+static int rx_emit_ovfl;      /* 1 = also emit a SO_RXQ_OVFL cmsg */
+static socklen_t rx_ovfl_len; /* 0 = the correct CMSG_LEN(sizeof(uint32_t)) */
+static uint32_t rx_ovfl_val;
 static int rx_msg_flags; /* flags the fake kernel reports back */
 
 static void
@@ -819,6 +876,9 @@ rx_reset(void)
     rx_cmsg_type = UDP_GRO;
     rx_cmsg_len = 0;
     rx_cmsg_val = 1400;
+    rx_emit_ovfl = 0;
+    rx_ovfl_len = 0;
+    rx_ovfl_val = 7;
     rx_msg_flags = 0;
 }
 
@@ -832,7 +892,7 @@ mqvpn_seam_recvmsg(int fd, struct msghdr *msg, int flags)
      * below poisons them precisely so a caller that resets only once outside
      * the retry loop trips these asserts on the retry. */
     assert(msg->msg_namelen == sizeof(struct sockaddr_storage));
-    assert(msg->msg_controllen == CMSG_SPACE(sizeof(int)));
+    assert(msg->msg_controllen == CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(uint32_t)));
     assert(msg->msg_flags == 0);
     assert(msg->msg_iovlen == 1);
     assert(msg->msg_iov[0].iov_base != NULL);
@@ -856,21 +916,31 @@ mqvpn_seam_recvmsg(int fd, struct msghdr *msg, int flags)
     msg->msg_namelen = sizeof(*sin);
     msg->msg_flags = rx_msg_flags;
 
+    /* The kernel puts SO_RXQ_OVFL (sock_recv_drops) before UDP_GRO. */
+    size_t used = 0;
+    if (rx_emit_ovfl) {
+        struct cmsghdr *cm = (struct cmsghdr *)msg->msg_control;
+        cm->cmsg_level = SOL_SOCKET;
+        cm->cmsg_type = SO_RXQ_OVFL;
+        cm->cmsg_len = rx_ovfl_len ? rx_ovfl_len : CMSG_LEN(sizeof(uint32_t));
+        memcpy(CMSG_DATA(cm), &rx_ovfl_val, sizeof(rx_ovfl_val));
+        used += CMSG_SPACE(sizeof(uint32_t));
+    }
     if (rx_emit_cmsg) {
-        struct cmsghdr *cm = CMSG_FIRSTHDR(msg);
-        assert(cm != NULL);
+        struct cmsghdr *cm = (struct cmsghdr *)((char *)msg->msg_control + used);
         cm->cmsg_level = rx_cmsg_level;
         cm->cmsg_type = rx_cmsg_type;
         cm->cmsg_len = rx_cmsg_len ? rx_cmsg_len : CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(cm), &rx_cmsg_val, sizeof(rx_cmsg_val));
-        msg->msg_controllen = CMSG_SPACE(sizeof(int));
-    } else {
-        msg->msg_controllen = 0;
+        used += CMSG_SPACE(sizeof(int));
     }
+    msg->msg_controllen = used;
     return (ssize_t)rx_payload_len;
 }
 
 /* ── RX: recvmsg wrapper ────────────────────────────────────────────── */
+
+static uint32_t rx_drops; /* the wrapper's *rxq_drops output */
 
 static ssize_t
 rx_call(size_t *seg, socklen_t *plen)
@@ -878,9 +948,10 @@ rx_call(size_t *seg, socklen_t *plen)
     static uint8_t buf[65536];
     static struct sockaddr_storage peer;
     *plen = sizeof(peer);
-    *seg = 12345; /* poison: the wrapper must always write this */
+    *seg = 12345;      /* poison: the wrapper must always write this */
+    rx_drops = 0xDEAD; /* and must leave this alone without a SO_RXQ_OVFL cmsg */
     return mqvpn_udp_recv_segmented(3, buf, sizeof(buf), (struct sockaddr *)&peer, plen,
-                                    seg);
+                                    seg, &rx_drops);
 }
 
 static void
@@ -947,6 +1018,49 @@ test_recv_bad_cmsg_ignored(void)
         assert(mqvpn_gro_seg_len(4200, seg, 4200) == 0);
     }
     printf("test_recv_bad_cmsg_ignored OK\n");
+}
+
+static void
+test_recv_rxq_ovfl(void)
+{
+    size_t seg;
+    socklen_t plen;
+
+    rx_reset(); /* no cmsg: the drop count is left untouched */
+    assert(rx_call(&seg, &plen) == 4200);
+    assert(rx_drops == 0xDEAD);
+
+    rx_reset(); /* the drop count alone */
+    rx_emit_ovfl = 1;
+    rx_ovfl_val = 41;
+    assert(rx_call(&seg, &plen) == 4200);
+    assert(rx_drops == 41 && seg == 0);
+
+    rx_reset(); /* with a GRO segment size: both are read */
+    rx_emit_ovfl = 1;
+    rx_emit_cmsg = 1;
+    rx_ovfl_val = 42;
+    assert(rx_call(&seg, &plen) == 4200);
+    assert(rx_drops == 42 && seg == 1400);
+
+    rx_reset(); /* a length the kernel never emits is ignored */
+    rx_emit_ovfl = 1;
+    rx_emit_cmsg = 1;
+    rx_ovfl_len = CMSG_LEN(sizeof(uint16_t));
+    assert(rx_call(&seg, &plen) == 4200);
+    assert(rx_drops == 0xDEAD && seg == 1400);
+
+    /* A NULL output pointer is allowed; the GRO size is still read. */
+    static uint8_t buf[65536];
+    struct sockaddr_storage peer;
+    rx_reset();
+    rx_emit_ovfl = 1;
+    rx_emit_cmsg = 1;
+    plen = sizeof(peer);
+    assert(mqvpn_udp_recv_segmented(3, buf, sizeof(buf), (struct sockaddr *)&peer, &plen,
+                                    &seg, NULL) == 4200);
+    assert(seg == 1400);
+    printf("test_recv_rxq_ovfl OK\n");
 }
 
 static void
@@ -1018,6 +1132,8 @@ main(void)
     test_gso_error_einval_resends();
     test_gso_error_enotsup_resends();
     test_gso_error_emsgsize_resends();
+    test_gso_error_emsgsize_df_drops();
+    test_single_emsgsize_drops();
     test_gso_error_after_progress_stops();
     test_eintr_retries();
     test_fallback_eintr_retries();
@@ -1036,6 +1152,7 @@ main(void)
     test_recv_no_cmsg();
     test_recv_gro_cmsg();
     test_recv_bad_cmsg_ignored();
+    test_recv_rxq_ovfl();
     test_recv_truncated_dropped();
     test_recv_eintr_retried();
     test_recv_eagain();

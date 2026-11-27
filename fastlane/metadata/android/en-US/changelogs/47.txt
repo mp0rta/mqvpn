@@ -1,0 +1,4 @@
+- Fix a blank screen when the app reopens; a settings load failure now shows a retry.
+- The connection status stays in step with the VPN service after the app is closed and reopened.
+- Fix downloads over the TCP lane stalling after the receiver's window fills.
+- A slow app over the TCP lane no longer holds up the other connections.

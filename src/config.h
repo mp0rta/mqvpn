@@ -65,19 +65,30 @@ typedef struct mqvpn_file_config_s {
 
     /* [Multipath] */
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
+    int path_backup[MQVPN_CONFIG_MAX_PATHS]; /* 1 = BackupPath / backup_paths */
     int n_paths;
     char scheduler[16];
     int allow_client_scheduler;   /* server */
     int request_server_scheduler; /* client */
     char cc[16]; /* congestion control: bbr2 (default), bbr, cubic, none */
 
-    char reinjection[16];                    /* "off" | "deadline" | "idle" | "dgram" */
+    char reinjection[16];                    /* "off" | "deadline" | "idle" */
     int reinjection_srtt_factor_pct;         /* deadline mode only; [100,1000] */
     int reinjection_hard_deadline_ms;        /* deadline mode only; [1,60000] */
     int reinjection_deadline_lower_bound_ms; /* deadline mode only; [1,60000] */
+    int redundant;                           /* client: send UDP on every path */
+    char redundant_ports[256];               /* "4200,9000"; empty = all UDP */
+    int redundant_ports_err;                 /* 1 = RedundantPorts invalid */
 
     /* draft-21 §4.6 initial Maximum Path Identifier TP, 0 = use xquic default 8 */
     unsigned long long init_max_path_id;
+
+    /* [Multipath] Bbr2FastConvergence / Bbr2RttvarCompensation — xquic's two
+     * BBRv2 extensions that mqvpn has always enabled. 1 (default) = enabled,
+     * unchanged; 0 = standard BBRv2 behaviour for that aspect. Ignored
+     * unless CC is bbr2. */
+    int bbr2_fast_convergence;
+    int bbr2_rttvar_compensation;
 
     /* [Interface] — client reconnection */
     int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */
@@ -85,7 +96,9 @@ typedef struct mqvpn_file_config_s {
     int kill_switch;        /* 1=block traffic outside tunnel, 0=off (default) */
     int manage_routes; /* 1=manage host routes (default), 0=skip routing table setup */
 
-    int tun_mtu; /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
+    int tun_mtu;  /* [Interface] MTU — 0=auto, >0=cap (floor 1280) */
+    int path_mtu; /* [Interface] PathMTU — 0=default packet size */
+    int pmtud;    /* [Interface] PMTUD — discover the path MTU, PathMTU is the cap */
 
     /* [Reorder] / repeated [ReorderRule] — flow-aware reorder shim (§16.1).
      * Seeded with mqvpn_reorder_config_default() in mqvpn_config_defaults(). */
@@ -112,6 +125,14 @@ typedef struct mqvpn_file_config_s {
      * the library ABI. */
     int udp_gro;
 
+    /* [Advanced] TunOffload — Linux TUN with the virtio header and TSO/USO
+     * reads; 1 (default) = use it when the kernel accepts it, 0 = plain TUN.
+     * TunGro — coalesce TCP and UDP written to that TUN; no effect when
+     * tun_offload is 0. Both apply to client and server and stay
+     * platform-side. */
+    int tun_offload;
+    int tun_gro;
+
     /* Inferred mode: 1=server, 0=client */
     int is_server;
 } mqvpn_file_config_t;
@@ -124,6 +145,9 @@ int mqvpn_config_load(mqvpn_file_config_t *cfg, const char *path);
 
 /* Parse JSON text into CLI cfg. Returns 0 on success, -1 on error. */
 int mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text);
+
+/* Parse HOST:PORT / [HOST]:PORT without truncation; port must be 1..65535. */
+int mqvpn_parse_host_port(const char *str, char *host, size_t host_len, int *port);
 
 /*
  * Resolve the effective control-API endpoint by merging INI/JSON config

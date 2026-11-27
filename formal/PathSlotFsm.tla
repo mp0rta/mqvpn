@@ -23,13 +23,10 @@
 \*                       path_on_event)
 \*   ApplyFailure        apply_failure_with_retry_check
 \*   FreeGate            maybe_transition_dropped_to_free
-\*   G15                 g_p15_xqc_app_status_for
 \*
 \* Besides the next slot, Step returns what the C code is observed to do:
 \*   fires      path_fsm_fire_path_event() was called (path_on_event fires
 \*              exactly when the lifecycle state changed)
-\*   notify     the app_status passed to client_notify_xqc_path_state(),
-\*              0 when it was not called
 \*   retryUpd   how recreate_after_us was updated:   KEEP | ZERO | ARM
 \*   stableUpd  how path_stable_since_us was updated: KEEP | ZERO | NOW
 \*   retriesUpd how recreate_retries was updated:    KEEP | ZERO | INC
@@ -85,13 +82,6 @@ Legal(s) ==
     [] s.state = "ClosedFree" ->
          ~s.attached /\ s.released /\ ~s.live /\ s.xqcId = NULL
          /\ ~s.retryArmed /\ ~s.stableArmed
-
-\* g_p15_xqc_app_status_for: 1 = STANDBY, 2 = AVAILABLE, 3 = FROZEN
-G15(from, to) ==
-  CASE from = "Active" /\ to = "Standby" -> 1
-    [] from = "Standby" /\ to = "Active" -> 2
-    [] from \in {"Active", "Standby"} /\ to = "Degraded" -> 3
-    [] OTHER -> 0
 
 --------------------------------------------------------------------------------
 \* Update-class helpers. A write of 0 is ZERO only over a nonzero value.
@@ -215,7 +205,6 @@ Step(s, ev, ctx) ==
   LET h == Handle(s, ev, ctx)
   IN [slot       |-> h.slot,
       fires      |-> ev # "STABLE_TICK" /\ h.slot.state # s.state,
-      notify     |-> G15(s.state, h.slot.state),
       retryUpd   |-> h.retryUpd,
       stableUpd  |-> h.stableUpd,
       retriesUpd |-> h.retriesUpd]

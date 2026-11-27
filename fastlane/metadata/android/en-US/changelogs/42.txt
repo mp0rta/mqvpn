@@ -1,0 +1,7 @@
+- New "Redundant Mode" setting: sends copies of UDP packets over more
+  than one connection at once, which helps live streams keep going when
+  a connection drops. Uses up to twice the data with two connections.
+- New "Scheduler" setting (minrtt or wlb). The status shows the one
+  the server uses; the server follows only if it allows it.
+- Streams lose fewer packets while a connection slows down for a few
+  seconds.

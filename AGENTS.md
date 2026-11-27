@@ -28,6 +28,8 @@ rules belong here, reasons there.
 - `third_party/xquic` — fork `mp0rta/xquic`, branch `mqvpn-main`;
   `third_party/lwip` — fork `mp0rta/heiher-lwip`, branch `mqvpn-main`
   (`git submodule update --init --recursive` after checkout)
+- `third_party/yyjson` — vendored yyjson 0.13.0 (JSON parse/serialize;
+  included only via `src/json_util.h`)
 - `tests/` (unit tests, e2e shell scripts), `scripts/ci_e2e/` (netns e2e),
   `.github/workflows/ci.yml`; build and test commands are in CONTRIBUTING.md
   sections 3 and 4 (the CI `sanitizer` job uses the same configure)
@@ -60,6 +62,10 @@ rules belong here, reasons there.
   Android/iOS remove and add. Do not unify them. [DD §4]
 - Public structs that carry `struct_size` grow only by appending fields, each
   with an `appended under ABI N` comment. `MQVPN_MAX_PATHS` is ABI-frozen.
+- The getters write their whole output struct without reading the caller's
+  `struct_size`. Growing a struct a getter fills in also needs a
+  `MQVPN_SOVERSION` bump in `CMakeLists.txt`; `tests/test_abi_sizes.c` fails
+  until it is done.
 - In the xquic fork the trade is reversed: growing a struct is an acceptable
   ABI break (pinned pair, coordinated rebuild, SemVer bump), while publishing
   a new exported function is the irreversible direction. Never add public
@@ -99,7 +105,8 @@ rules belong here, reasons there.
 - Adding a config key = one row in the descriptor table (`src/config.c`) +
   one key in `test_ini_json_scalar_parity` (`tests/test_config.c`) + the key
   in `website/guide/configuration.md` and `website/ja/guide/configuration.md`.
-  [DD §10]
+  A key the library reads also needs the setter and CLI steps listed under
+  "Adding a config key" in CONTRIBUTING.md. [DD §10]
 - Test files that call `assert()` carry `#undef NDEBUG` (CI-checked). Claim
   test results only from a Debug or sanitizer build, never from `build.sh`'s
   Release build. [DD §10]
@@ -107,6 +114,11 @@ rules belong here, reasons there.
   ASan/UBSan (the CI `sanitizer` job). Control API or connection-lifecycle
   changes need the sudo netns e2e suite (`scripts/ci_e2e/`). [DD §10]
 - A new test target must resolve its includes in a clean checkout. [DD §10]
+- All JSON parsing and serialization goes through yyjson, included only via
+  `src/json_util.h`; the only hand-written JSON literals are the control
+  API's fixed `response too large` and `too many connections` replies and
+  `--status`'s fixed request strings; never scan JSON with
+  `strchr`/`strstr`. [DD §15]
 - `ci_sweep_results/` is transient; `bench_results/` is the tracked archive.
 
 ## Rules — git
