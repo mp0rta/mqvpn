@@ -251,7 +251,12 @@ main(int argc, char *argv[])
             char pair[360];
             snprintf(pair, sizeof(pair), "%s", optarg);
             char *uname, *ukey, *uip;
-            if (mqvpn_user_spec_split(pair, &uname, &ukey, &uip) < 0) {
+            int split_rc = mqvpn_user_spec_split(pair, &uname, &ukey, &uip);
+            if (split_rc == -2) {
+                fprintf(stderr, "error: --user: the IP is not an IPv4 address\n");
+                return 1;
+            }
+            if (split_rc < 0) {
                 fprintf(stderr, "error: --user must be NAME:KEY or NAME:KEY:IP\n");
                 return 1;
             }

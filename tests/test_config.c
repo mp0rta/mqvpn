@@ -3052,7 +3052,13 @@ test_user_spec_split(void)
         {"alice:a:b:10.0.0.10", 0, "alice", "a:b", "10.0.0.10"},
         {"alice::10.0.0.10", 0, "alice", ":10.0.0.10", NULL},
         {"alice:10.0.0.10", 0, "alice", "10.0.0.10", NULL},
-        {"alice:k:10.0.0.256", 0, "alice", "k:10.0.0.256", NULL},
+        {"alice:k:1234", 0, "alice", "k:1234", NULL},
+        {"alice:k:v1.x", 0, "alice", "k:v1.x", NULL},
+        {"alice:10.0.0.256", 0, "alice", "10.0.0.256", NULL},
+        {"alice:k:10.0.0.256", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0.1.2", -2, NULL, NULL, NULL},
+        {"alice:a:b:1.5", -2, NULL, NULL, NULL},
         {"alice", -1, NULL, NULL, NULL},
         {":k", -1, NULL, NULL, NULL},
         {"alice:", -1, NULL, NULL, NULL},
@@ -3066,6 +3072,24 @@ test_user_spec_split(void)
         ASSERT_EQ_STR(k, t[i].key, t[i].in);
         ASSERT_TRUE(t[i].ip ? (ip && strcmp(ip, t[i].ip) == 0) : ip == NULL, t[i].in);
     }
+}
+
+/* A mistyped fixed address must fail the load, not become part of the key. */
+static void
+test_user_spec_mistyped_ip_fails_load(void)
+{
+    mqvpn_file_config_t cfg;
+    char *path = write_tmp("[Auth]\nUser=alice:k:10.0.0.999\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "INI mistyped fixed IP");
+    unlink(path);
+    ASSERT_EQ_INT(cfg.n_users, 0, "INI mistyped fixed IP adds no user");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[\"alice:k:10.0.0.999\"]}"), -1,
+        "JSON mistyped fixed IP");
+    ASSERT_EQ_INT(cfg.n_users, 0, "JSON mistyped fixed IP adds no user");
 }
 
 /* Table-driven round-trip test over MQVPN_SCHED_LIST / MQVPN_CC_LIST
@@ -3115,6 +3139,7 @@ main(void)
 {
     test_defaults();
     test_user_spec_split();
+    test_user_spec_mistyped_ip_fails_load();
     test_file_encoding();
     test_physical_line_numbers();
     test_host_port_strict();
