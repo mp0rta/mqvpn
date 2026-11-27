@@ -46,6 +46,8 @@ static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test 
 static int g_reinject_n = 1;           /* copies the reinject getter returns */
 static int g_sched_n = 1;              /* entries the sched getter returns */
 static char g_sched_label[16] = "wlb"; /* scheduler name each entry carries */
+static char g_sched_vpn_ip[16] = "10.0.0.7";
+static char g_sched_vpn_ip6[46] = "";
 
 static int g_fec_rc = 1;
 static mqvpn_internal_fec_stats_t g_fec_tmpl;
@@ -168,8 +170,8 @@ mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sch
     int n = g_sched_n < max ? g_sched_n : max;
     for (int i = 0; i < n; i++) {
         snprintf(out[i].scheduler, sizeof(out[i].scheduler), "%s", g_sched_label);
-        snprintf(out[i].vpn_ip, sizeof(out[i].vpn_ip), "10.0.0.7");
-        out[i].vpn_ip6[0] = '\0';
+        snprintf(out[i].vpn_ip, sizeof(out[i].vpn_ip), "%s", g_sched_vpn_ip);
+        snprintf(out[i].vpn_ip6, sizeof(out[i].vpn_ip6), "%s", g_sched_vpn_ip6);
     }
     return n;
 }
@@ -870,6 +872,10 @@ seed_worst_case(void)
     g_sched_n = MQVPN_MAX_USERS;
     memset(g_sched_label, 's', 15);
     g_sched_label[15] = '\0';
+    memset(g_sched_vpn_ip, '4', 15);
+    g_sched_vpn_ip[15] = '\0';
+    memset(g_sched_vpn_ip6, '6', 45);
+    g_sched_vpn_ip6[45] = '\0';
 }
 
 static void
