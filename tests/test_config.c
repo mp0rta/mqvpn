@@ -3059,6 +3059,15 @@ test_user_spec_split(void)
         {"alice:k:10.0.0", -2, NULL, NULL, NULL},
         {"alice:k:10.0.0.1.2", -2, NULL, NULL, NULL},
         {"alice:a:b:1.5", -2, NULL, NULL, NULL},
+        {"alice:k:010.0.0.1", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0.1.", -2, NULL, NULL, NULL},
+        {"alice:k:10..0.1", -2, NULL, NULL, NULL},
+        /* Not only digits and dots: stays in the key, as before. */
+        {"alice:k:10.0.0.1/24", 0, "alice", "k:10.0.0.1/24", NULL},
+        {"alice:k:10,0,0,1", 0, "alice", "k:10,0,0,1", NULL},
+        {"alice:k:10.0.0.l", 0, "alice", "k:10.0.0.l", NULL},
+        /* Valid IPv4 that is no client address: split here, refused later. */
+        {"alice:k:255.255.255.255", 0, "alice", "k", "255.255.255.255"},
         {"alice", -1, NULL, NULL, NULL},
         {":k", -1, NULL, NULL, NULL},
         {"alice:", -1, NULL, NULL, NULL},

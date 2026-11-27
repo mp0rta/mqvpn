@@ -2943,10 +2943,17 @@ srv_alice_server_addr(mqvpn_config_t *cfg)
     ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "alice", "ka", "10.0.0.1"), MQVPN_OK);
 }
 
+static void
+srv_alice_broadcast(mqvpn_config_t *cfg)
+{
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "alice", "ka", "255.255.255.255"), MQVPN_OK);
+}
+
 TEST(server_new_rejects_fixed_ip_outside_pool)
 {
     ASSERT_NULL(fx_plain_server(srv_alice_outside));
     ASSERT_NULL(fx_plain_server(srv_alice_server_addr));
+    ASSERT_NULL(fx_plain_server(srv_alice_broadcast));
 }
 
 TEST(fixed_ip_assigned)
