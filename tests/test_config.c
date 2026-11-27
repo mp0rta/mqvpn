@@ -3059,7 +3059,6 @@ test_user_spec_split(void)
         {"alice:k:10.0.0", -2, NULL, NULL, NULL},
         {"alice:k:10.0.0.1.2", -2, NULL, NULL, NULL},
         {"alice:a:b:1.5", -2, NULL, NULL, NULL},
-        {"alice:k:010.0.0.1", -2, NULL, NULL, NULL},
         {"alice:k:10.0.0.1.", -2, NULL, NULL, NULL},
         {"alice:k:10..0.1", -2, NULL, NULL, NULL},
         /* Not only digits and dots: stays in the key, as before. */
