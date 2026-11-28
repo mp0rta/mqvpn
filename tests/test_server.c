@@ -3083,9 +3083,19 @@ TEST(runtime_reserve_change_two_sessions)
     ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 2), 0);
     ASSERT_EQ(mqvpn_server_test_pool_used(lb.svr, 50), 0);
 
+    /* Both handshakes at once: the old sessions' teardown runs on xquic's
+     * real-time close timer (about 75 ms on loopback), and two handshakes in a
+     * row lose that race on a slow (MSan) build. */
     fx_cli_t new_alice, new_bob;
-    fx_connect(&lb, &new_alice, "ka", NULL, 0);
-    fx_connect(&lb, &new_bob, "kb", (fx_cli_t *[]){&new_alice}, 1);
+    fx_cli_t *fresh[] = {&new_alice, &new_bob};
+    fx_cli_start(&lb, &new_alice, "ka");
+    fx_cli_start(&lb, &new_bob, "kb");
+    fx_pump(&lb, fresh, 2, done_ready, &new_alice, 10000);
+    fx_pump(&lb, fresh, 2, done_ready, &new_bob, 10000);
+    ASSERT_EQ(new_alice.ready, 1);
+    ASSERT_EQ(new_bob.ready, 1);
+    ASSERT_EQ(mqvpn_client_set_tun_active(new_alice.cli, 1, -1), MQVPN_OK);
+    ASSERT_EQ(mqvpn_client_set_tun_active(new_bob.cli, 1, -1), MQVPN_OK);
     ASSERT_EQ(new_alice.info.assigned_ip[3], 2);
     ASSERT_NE(new_bob.info.assigned_ip[3], 2);
     ASSERT_EQ(ev_count('C'), 4);
