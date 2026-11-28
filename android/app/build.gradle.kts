@@ -7,7 +7,12 @@ plugins {
 
 android {
     namespace = "com.mqvpn.app"
-    compileSdk = 37
+    // Compose 1.13 (BOM 2026.11.01) requires compiling against API 37.1.
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
 
     // AGP embeds a Google-signed "dependency metadata" block in the APK
     // signing block by default. It is not reproducible and F-Droid rejects
@@ -75,7 +80,7 @@ dependencies {
     implementation(project(":sdk-network"))
 
     // Compose
-    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
