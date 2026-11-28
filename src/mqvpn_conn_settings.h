@@ -32,6 +32,15 @@
  * never exceeds a quarter of the connection window. */
 #define MQVPN_STREAM_INIT_RECV_WINDOW (15 * 1024)
 
+/* DATAGRAM packets a connection may hold unsent before a datagram send
+ * gets -XQC_EAGAIN (xqc_conn_settings_t.max_dgram_unsent_packets, xquic
+ * #117). Under a 100 Mbit/s UDP flood over a 50+20 Mbit/s pair, 256 kept
+ * the tunnel ping at 42-47 ms median (p95 under 160 ms, from ~2.5 s) at
+ * full goodput; a fast pair lost ~8% of its throughput against 512 (#447). */
+#ifndef MQVPN_DGRAM_UNSENT_PACKETS
+#  define MQVPN_DGRAM_UNSENT_PACKETS 256
+#endif
+
 /* Caller-driven inputs. The bools are parameterised (not a single
  * `is_server` flag) so each call site documents its intent. */
 typedef struct {
