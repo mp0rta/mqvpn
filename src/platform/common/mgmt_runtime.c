@@ -25,7 +25,7 @@ mgmt_runtime_start(mgmt_runtime_t *rt, struct event_base *eb,
     }
 
     lo.path = rt->path;
-    lo.mode = mgmt_listen_parse_mode(cfg->client_mgmt_socket_mode);
+    lo.mode = cfg->client_mgmt_socket_mode;
     lo.group = cfg->client_mgmt_socket_group;
     rt->listener = mgmt_listen_open(&lo, err, sizeof(err));
     if (!rt->listener) {

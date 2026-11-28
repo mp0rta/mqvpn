@@ -32,6 +32,11 @@ if [ ! -f "$MQVPN" ]; then
 fi
 
 MQVPN="$(realpath "$MQVPN")"
+MQVPNCTL="$(dirname "$MQVPN")/mqvpnctl"
+if [ ! -x "$MQVPNCTL" ]; then
+    echo "error: mqvpnctl not found or not executable at $MQVPNCTL"
+    exit 1
+fi
 WORK_DIR="$(mktemp -d)"
 
 # Generate PSK
@@ -114,7 +119,11 @@ fi
 echo "Server running (PID $SERVER_PID)"
 
 echo "=== Starting VPN client ==="
+MGMT_SOCK="${WORK_DIR}/mgmt.sock"
+printf '[ClientManagement]\nEnabled = true\nEndpoint = %s\n' "$MGMT_SOCK" \
+    > "${WORK_DIR}/client.conf"
 ip netns exec vpn-client "$MQVPN" \
+    --config "${WORK_DIR}/client.conf" \
     --mode client \
     --server 192.168.100.2:4433 \
     --auth-key "$PSK" \
@@ -171,11 +180,38 @@ else
     exit 1
 fi
 
+echo ""
+echo "=== Test 1b: Client management socket on the running client ==="
+mgmt_fail() {
+    echo "=== FAIL: $1 ==="
+    echo "--- Client log ---"
+    cat "${WORK_DIR}/client.log"
+    exit 1
+}
+MGMT_MODE=$(stat -c %a "$MGMT_SOCK" 2>/dev/null || echo none)
+[ "$MGMT_MODE" = "660" ] || mgmt_fail "management socket mode is ${MGMT_MODE}, expected 660"
+"$MQVPNCTL" --endpoint "$MGMT_SOCK" version || mgmt_fail "mqvpnctl version failed"
+# A peer that closes without reading its replies must not kill the client.
+python3 -c 'import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+s.sendall(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"system.ping\"}\n" * 50)' "$MGMT_SOCK" \
+    || mgmt_fail "raw management client failed"
+sleep 1
+kill -0 "$CLIENT_PID" 2>/dev/null || mgmt_fail "client died after a peer closed early"
+"$MQVPNCTL" --endpoint "$MGMT_SOCK" version >/dev/null \
+    || mgmt_fail "mqvpnctl version failed after a peer closed early"
+echo "=== PASS: management socket answers on the running client ==="
+
 # Stop client for next test
 kill "$CLIENT_PID" 2>/dev/null || true
 wait "$CLIENT_PID" 2>/dev/null || true
 CLIENT_PID=""
 sleep 2
+if [ -e "$MGMT_SOCK" ]; then
+    echo "=== FAIL: management socket left behind after the client stopped ==="
+    exit 1
+fi
 
 echo ""
 echo "=== Test 2: Self-signed cert rejected without --insecure ==="

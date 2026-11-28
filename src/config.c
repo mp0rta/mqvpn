@@ -412,6 +412,7 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
 typedef enum {
     CFGK_STR,             /* char[]: snprintf copy, silent truncation          */
     CFGK_STR_FIT,         /* char[]: a value that does not fit is invalid      */
+    CFGK_FILE_MODE,       /* int: octal string up to 07777                     */
     CFGK_BOOL,            /* int: INI true/false, JSON bool; bad = load error  */
     CFGK_INT,             /* int: int_ok() gate; optional fallback on invalid  */
     CFGK_U32,             /* uint32_t: inclusive max bound                     */
@@ -517,8 +518,8 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
         (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                      \
             sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
     }
-/* For values where a truncated string would mean something else (a file mode,
- * a group name): too long = invalid, field left at its default. */
+/* For values where a truncated string would mean something else (a group
+ * name): too long = invalid, field left at its default. */
 #define CFG_STR_FIT(sec, ik, jk, field)                                    \
     {                                                                      \
         (sec), (ik), (jk), CFGK_STR_FIT, CFGK_OFF(field),                  \
@@ -592,8 +593,8 @@ static const cfg_key_desc_t cfg_keys[] = {
     /* [ClientManagement] — client-side management IPC (off by default) */
     CFG_BOOL(SEC_CLIENT_MGMT, "Enabled", "client_mgmt_enabled", client_mgmt_enabled),
     CFG_STR(SEC_CLIENT_MGMT, "Endpoint", "client_mgmt_endpoint", client_mgmt_endpoint),
-    CFG_STR_FIT(SEC_CLIENT_MGMT, "SocketMode", "client_mgmt_socket_mode",
-                client_mgmt_socket_mode),
+    {SEC_CLIENT_MGMT, "SocketMode", "client_mgmt_socket_mode", CFGK_FILE_MODE,
+     CFGK_OFF(client_mgmt_socket_mode), 0, 0, NULL, 0, 0, NULL},
     CFG_STR_FIT(SEC_CLIENT_MGMT, "SocketGroup", "client_mgmt_socket_group",
                 client_mgmt_socket_group),
     /* [Multipath] */
@@ -681,6 +682,13 @@ cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_s
         if (strlen(v_str) >= d->size) return -1;
         snprintf(base, d->size, "%s", v_str);
         break;
+    case CFGK_FILE_MODE: {
+        char *end;
+        unsigned long m = strtoul(v_str, &end, 8);
+        if (end == v_str || *end != '\0' || m > 07777) return -1;
+        *(int *)base = (int)m;
+        break;
+    }
     case CFGK_BOOL: *(int *)base = v_int; break;
     case CFGK_INT:
         /* forced-invalid sentinel from the walkers. Note: a genuine input of
@@ -741,6 +749,7 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
         switch (d->type) {
         case CFGK_STR:
         case CFGK_STR_FIT:
+        case CFGK_FILE_MODE:
         case CFGK_HYBRID_TCP_MODE: rc = cfg_key_store(cfg, d, val, 0, 0); break;
         case CFGK_BOOL: {
             int bv = parse_bool(val);
@@ -820,6 +829,7 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, yyjson_val *root, yyjson_val *ro,
         switch (d->type) {
         case CFGK_STR:
         case CFGK_STR_FIT:
+        case CFGK_FILE_MODE:
         case CFGK_HYBRID_TCP_MODE:
             if (json_copy_str(v, sbuf, sizeof(sbuf)) < 0)
                 rc = -1;
@@ -1321,6 +1331,7 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     snprintf(cfg->scheduler, sizeof(cfg->scheduler), "wlb");
     snprintf(cfg->cc, sizeof(cfg->cc), "bbr2");
     snprintf(cfg->reinjection, sizeof(cfg->reinjection), "off");
+    cfg->client_mgmt_socket_mode = 0660;
     cfg->reinjection_srtt_factor_pct = 110;
     cfg->reinjection_hard_deadline_ms = 500;
     cfg->reinjection_deadline_lower_bound_ms = 20;

@@ -65,7 +65,7 @@ typedef struct mqvpn_file_config_s {
     /* [ClientManagement] — client; Enabled defaults to off */
     int client_mgmt_enabled;
     char client_mgmt_endpoint[280];
-    char client_mgmt_socket_mode[8];
+    int client_mgmt_socket_mode;       /* permission bits; default 0660 */
     char client_mgmt_socket_group[33]; /* 32-char group name + NUL */
 
     /* [Multipath] */

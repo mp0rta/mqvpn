@@ -567,26 +567,6 @@ test_live_socket_matching_record_not_removed(void)
     printf("PASS listen_live_socket_matching_record_not_removed\n");
 }
 
-static void
-test_parse_mode(void)
-{
-    g_logcount = 0;
-    mqvpn_log_set_sink(log_sink, NULL);
-    CHECK(mgmt_listen_parse_mode("") == 0660);
-    CHECK(mgmt_listen_parse_mode(NULL) == 0660);
-    CHECK(mgmt_listen_parse_mode("0640") == 0640);
-    CHECK(mgmt_listen_parse_mode("640") == 0640);
-    CHECK(g_logcount == 0); /* valid and empty inputs are silent */
-    CHECK(mgmt_listen_parse_mode("abc") == 0660);
-    CHECK(g_logcount == 1);
-    CHECK(strstr(g_logbuf, "invalid ClientManagement SocketMode 'abc'") != NULL);
-    CHECK(mgmt_listen_parse_mode("10000") == 0660);
-    CHECK(mgmt_listen_parse_mode("0660x") == 0660);
-    CHECK(g_logcount == 3);
-    mqvpn_log_set_sink(NULL, NULL);
-    printf("PASS listen_parse_mode\n");
-}
-
 int
 main(void)
 {
@@ -608,7 +588,6 @@ main(void)
     test_parent_dir_0755_under_umask_077();
     test_foreign_lock_file_untouched();
     test_live_socket_matching_record_not_removed();
-    test_parse_mode();
     if (g_failed) {
         fprintf(stderr, "%d check(s) failed\n", g_failed);
         return 1;

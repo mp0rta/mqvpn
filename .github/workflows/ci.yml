@@ -773,7 +773,7 @@ jobs:
           path: build
 
       - name: Make binary executable
-        run: chmod +x build/mqvpn
+        run: chmod +x build/mqvpn build/mqvpnctl
 
       - name: Smoke test (netns)
         run: sudo scripts/ci_e2e/run_test.sh

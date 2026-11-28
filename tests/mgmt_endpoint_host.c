@@ -123,8 +123,9 @@ main(int argc, char **argv)
 #endif
 
     char err[256] = "";
-    mgmt_listen_opts_t lo = {
-        .path = path, .mode = mgmt_listen_parse_mode(mode_s), .group = group};
+    mgmt_listen_opts_t lo = {.path = path,
+                             .mode = mode_s ? (int)strtol(mode_s, NULL, 8) : 0660,
+                             .group = group};
     mgmt_listen_t *l = mgmt_listen_open(&lo, err, sizeof(err));
     if (!l) {
         fprintf(stderr, "mgmt_endpoint_host: %s\n", err);

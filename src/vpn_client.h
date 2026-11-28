@@ -57,7 +57,7 @@ typedef struct mqvpn_client_cfg_s {
     int tun_gro;                  /* [Advanced] TunGro; default 1 */
     int client_mgmt_enabled;      /* [ClientManagement] Enabled; default 0 */
     const char *client_mgmt_endpoint;     /* "" = OS default path */
-    const char *client_mgmt_socket_mode;  /* octal string; "" = 0660 */
+    int client_mgmt_socket_mode;          /* permission bits of the socket */
     const char *client_mgmt_socket_group; /* "" = the client's own group */
 } mqvpn_client_cfg_t;
 
