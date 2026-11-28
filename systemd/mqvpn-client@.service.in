@@ -25,6 +25,10 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 ReadOnlyPaths=/etc/mqvpn
 ReadWritePaths=/dev/net/tun /etc/resolv.conf /etc/resolv.conf.mqvpn.bak
+# /run/mqvpn for the [ClientManagement] socket. Instances share it, so one
+# instance stopping must not remove it.
+RuntimeDirectory=mqvpn
+RuntimeDirectoryPreserve=yes
 
 [Install]
 WantedBy=multi-user.target
