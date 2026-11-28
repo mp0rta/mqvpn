@@ -17,25 +17,26 @@
 typedef struct {
     const char *path;  /* resolved endpoint path */
     int mode;          /* POSIX: socket file mode, e.g. 0660. Windows: ignored */
-    const char *group; /* POSIX: NULL/"" = no chown. Windows: ignored */
+    const char *group; /* POSIX: NULL/"" = the process's own group. Windows: ignored */
 } mgmt_listen_opts_t;
 
 typedef struct mgmt_listen mgmt_listen_t;
 
 /*
  * Order (each step only after the previous one succeeded):
- *   1. create the missing parent directories (0755, less the umask)
+ *   1. create the missing parent directories (0755 whatever the umask)
  *   2. open <path>.lock and take flock(LOCK_EX|LOCK_NB); a held lock means
- *      another endpoint owns the path
+ *      another endpoint owns the path. A lock file that is neither empty nor
+ *      a record is someone else's file: failure, left untouched
  *   3. stale check with lstat(path): absent is fine; a socket whose
- *      (st_dev, st_ino) equals the record in the lock file is ours from a
- *      previous run and is unlinked; anything else is a failure and is left
- *      untouched
+ *      (st_dev, st_ino) equals the record in the lock file and that refuses
+ *      connections is ours from a previous run and is unlinked; anything
+ *      else is a failure and is left untouched
  *   4. socket + bind
  *   5. immediately record the socket's "%llu %llu\n" (st_dev st_ino) in the
  *      lock file, so a crash before listen is still recognised next time
- *   6. chmod(mode), chown(-1, gid) when a group is given (an unknown group is
- *      a warning, not a failure)
+ *   6. chmod(mode), chown(-1, gid): the given group, else the process's own
+ *      (an unknown group is a warning, not a failure)
  *   7. listen
  * On failure returns NULL with a reason in errbuf, releases the lock and
  * unlinks the socket only if step 4 created it.

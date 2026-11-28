@@ -2578,6 +2578,31 @@ test_client_mgmt_defaults(void)
                   "client_mgmt_socket_group default empty");
 }
 
+/* A truncated mode or group would be a different valid mode or group. */
+static void
+test_client_mgmt_long_values_rejected(void)
+{
+    char *path = write_tmp("[ClientManagement]\n"
+                           "SocketMode = 00000660\n"
+                           "SocketGroup = abcdefghijklmnopqrstuvwxyz0123456\n");
+    mqvpn_file_config_t c;
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(mqvpn_config_load(&c, path), 0, "long mgmt values: load ok");
+    unlink(path);
+    ASSERT_EQ_STR(c.client_mgmt_socket_mode, "", "8-char SocketMode is ignored");
+    ASSERT_EQ_STR(c.client_mgmt_socket_group, "", "33-char SocketGroup is ignored");
+
+    path = write_tmp("[ClientManagement]\n"
+                     "SocketMode = 0000660\n"
+                     "SocketGroup = abcdefghijklmnopqrstuvwxyz012345\n");
+    mqvpn_config_defaults(&c);
+    ASSERT_EQ_INT(mqvpn_config_load(&c, path), 0, "max-length mgmt values: load ok");
+    unlink(path);
+    ASSERT_EQ_STR(c.client_mgmt_socket_mode, "0000660", "7-char SocketMode kept");
+    ASSERT_EQ_STR(c.client_mgmt_socket_group, "abcdefghijklmnopqrstuvwxyz012345",
+                  "32-char SocketGroup kept");
+}
+
 static void
 test_json_bool_strict(void)
 {
@@ -3129,6 +3154,7 @@ main(void)
 
     /* INI/JSON scalar-key parity */
     test_client_mgmt_defaults();
+    test_client_mgmt_long_values_rejected();
     test_ini_json_scalar_parity();
     test_redundant_ports_ini_json();
     test_redundant_ini_bool();

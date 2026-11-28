@@ -506,6 +506,68 @@ test_parent_dir_created_0755(void)
 }
 
 static void
+test_parent_dir_0755_under_umask_077(void)
+{
+    char p[300], sub[300], err[256];
+    struct stat st;
+    fresh_dir();
+    snprintf(p, sizeof(p), "%s/dir/x.sock", g_dir);
+    snprintf(sub, sizeof(sub), "%s/dir", g_dir);
+    mode_t old = umask(077);
+    mgmt_listen_t *l = open_at(p, 0660, NULL, err, sizeof(err));
+    umask(old);
+    CHECK(l != NULL);
+    CHECK(stat(sub, &st) == 0 && (st.st_mode & 07777) == 0755);
+    mgmt_listen_close(l);
+    rm_dir();
+    printf("PASS listen_parent_dir_0755_under_umask_077\n");
+}
+
+static void
+test_foreign_lock_file_untouched(void)
+{
+    char p[300], lp[320], err[256], buf[32] = {0};
+    fresh_dir();
+    sock_path(p, sizeof(p), "a.sock");
+    snprintf(lp, sizeof(lp), "%s.lock", p);
+    int f = open(lp, O_CREAT | O_RDWR, 0644);
+    CHECK(write(f, "precious\n", 9) == 9);
+    mgmt_listen_t *l = open_at(p, 0660, NULL, err, sizeof(err));
+    CHECK(l == NULL);
+    CHECK(strstr(err, "not an mqvpn lock file") != NULL);
+    CHECK(pread(f, buf, sizeof(buf) - 1, 0) == 9 && strcmp(buf, "precious\n") == 0);
+    CHECK(ino_of(p) == 0); /* no socket was created */
+    close(f);
+    if (l) mgmt_listen_close(l);
+    rm_dir();
+    printf("PASS listen_foreign_lock_file_untouched\n");
+}
+
+/* Inode reuse: the record matches a socket another program is serving. */
+static void
+test_live_socket_matching_record_not_removed(void)
+{
+    char p[300], lp[320], err[256];
+    fresh_dir();
+    sock_path(p, sizeof(p), "a.sock");
+    snprintf(lp, sizeof(lp), "%s.lock", p);
+    int foreign = bind_sock(p, 1);
+    CHECK(foreign >= 0);
+    ino_t before = ino_of(p);
+    int f = open(lp, O_CREAT | O_WRONLY, 0644);
+    write_lock_record(f, p);
+    close(f);
+    mgmt_listen_t *l = open_at(p, 0660, NULL, err, sizeof(err));
+    CHECK(l == NULL);
+    CHECK(strstr(err, "in use by another program") != NULL);
+    CHECK(ino_of(p) == before && connectable(p));
+    if (l) mgmt_listen_close(l);
+    close(foreign);
+    rm_dir();
+    printf("PASS listen_live_socket_matching_record_not_removed\n");
+}
+
+static void
 test_parse_mode(void)
 {
     g_logcount = 0;
@@ -543,6 +605,9 @@ main(void)
     test_unknown_group_warns_and_continues();
     test_path_too_long();
     test_parent_dir_created_0755();
+    test_parent_dir_0755_under_umask_077();
+    test_foreign_lock_file_untouched();
+    test_live_socket_matching_record_not_removed();
     test_parse_mode();
     if (g_failed) {
         fprintf(stderr, "%d check(s) failed\n", g_failed);

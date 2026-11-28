@@ -417,7 +417,10 @@ Each layer is testable alone, and `scripts/lint/check_mgmt_layering.sh`
 enforces the directions. The listener trusts the socket's parent directory,
 which it creates `0755`: a process that can write there can swap the path
 between `lstat` and `chmod` or `unlink`, and such a process already controls
-the endpoint. The socket's group is set explicitly (`SocketGroup`, else the
+the endpoint. Inside that directory the listener still removes only what
+is provably its own: a stale socket goes only when the lock file's record
+names it and nothing answers on it (an inode number can be reused), and a
+lock file that holds anything but a record is left alone. The socket's group is set explicitly (`SocketGroup`, else the
 client's effective group), because BSD gives a new file the directory's group.
 Permission is the listener's role, stamped on the connection,
 not a per-call check. There is no fixed buffer: one response is in flight per

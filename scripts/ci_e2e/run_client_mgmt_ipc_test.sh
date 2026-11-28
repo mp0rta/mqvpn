@@ -293,6 +293,29 @@ for i in 1 2 3 4; do
 done
 if [ -z "$bad" ]; then pass "T10 4 concurrent mqvpnctl version: all exit 0"; else fail "T10 concurrent versions" "$bad"; fi
 
+# ---- T10c: output that cannot be written is not a success
+if [ -c /dev/full ]; then
+    "$CTL" --endpoint "$S" version >/dev/full 2>"$TMPD/t10c.err"
+    rc=$?
+    if [ "$rc" -eq 1 ]; then pass "T10c stdout full -> exit 1"; else fail "T10c stdout full" "exit=$rc" "stderr: $(cat "$TMPD/t10c.err")"; fi
+else
+    skip "T10c stdout full" "no /dev/full"
+fi
+
+# ---- T10d: --json keeps a local error on stdout as JSON
+long=$(printf 'a%.0s' $(seq 1 200))
+out=$("$CTL" --json --endpoint "/tmp/$long" version 2>"$TMPD/t10d.err")
+rc=$?
+case "$out" in
+    *MQVPN_CLIENT_INVALID_PARAMS*) json_ok=1 ;;
+    *) json_ok=0 ;;
+esac
+if [ "$rc" -eq 2 ] && [ "$json_ok" -eq 1 ] && [ ! -s "$TMPD/t10d.err" ]; then
+    pass "T10d --json long endpoint -> exit 2, JSON error on stdout"
+else
+    fail "T10d --json long endpoint" "exit=$rc" "stdout: $out" "stderr: $(cat "$TMPD/t10d.err")"
+fi
+
 # ---- T10b: connection limit reached -> BUSY reply (id null) -> exit 1, MQVPN_CLIENT_BUSY
 BS=$TMPD/busy.sock
 if start_host h10b "$BS" --max-conn 1 --handshake-ms 30000; then

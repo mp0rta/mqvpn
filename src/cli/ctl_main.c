@@ -4,6 +4,7 @@
 #include "ctl_cmd.h"
 
 #include "cmp_endpoint.h"
+#include "cmp_error.h"
 #include "ctl_sock.h"
 
 #include <stdio.h>
@@ -26,6 +27,15 @@ usage(FILE *f)
                "  -h, --help      show this help\n");
 }
 
+/* The exit code, or 1 when the output did not reach stdout. */
+static int
+finish(int rc)
+{
+    if (fflush(stdout) == 0 && !ferror(stdout)) return rc;
+    fprintf(stderr, "mqvpnctl: cannot write output\n");
+    return rc ? rc : 1;
+}
+
 static int
 parse_timeout(const char *s)
 {
@@ -44,7 +54,7 @@ main(int argc, char **argv)
         const char *a = argv[i];
         if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             usage(stdout);
-            return 0;
+            return finish(0);
         } else if (strcmp(a, "--json") == 0) {
             o.json = 1;
         } else if (strcmp(a, "--endpoint") == 0 || strcmp(a, "--timeout") == 0) {
@@ -76,13 +86,14 @@ main(int argc, char **argv)
     char ep[CMP_ENDPOINT_MAX];
     if (!o.endpoint) o.endpoint = getenv("MQVPN_CLIENT_ENDPOINT");
     if (cmp_endpoint_resolve(o.endpoint, ep, sizeof(ep)) != 0) {
-        fprintf(stderr, "mqvpnctl: endpoint path too long\n");
-        return 2;
+        ctl_emit_error(&o, CMP_E_INVALID_PARAMS, "endpoint path too long", NULL);
+        return finish(2);
     }
     if (strlen(ep) > ctl_sock_max_path()) {
-        fprintf(stderr, "mqvpnctl: endpoint path too long for AF_UNIX\n");
-        return 2;
+        ctl_emit_error(&o, CMP_E_INVALID_PARAMS, "endpoint path too long for AF_UNIX",
+                       NULL);
+        return finish(2);
     }
     o.endpoint = ep;
-    return ctl_cmd_version(&o);
+    return finish(ctl_cmd_version(&o));
 }

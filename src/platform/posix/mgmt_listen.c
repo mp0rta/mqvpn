@@ -54,7 +54,12 @@ mkdir_parents(const char *path)
     for (char *p = d; *p; p++) {
         if (p == d || *p != '/') continue;
         *p = '\0';
-        if (mkdir(d, 0755) != 0 && errno != EEXIST) {
+        if (mkdir(d, 0755) == 0) {
+            /* A directory we made must let SocketGroup members reach the socket
+             * whatever the umask was. */
+            if (chmod(d, 0755) != 0) { /* best effort */
+            }
+        } else if (errno != EEXIST) {
             int e = errno;
             free(d);
             errno = e;
@@ -92,6 +97,25 @@ path_is_ours(const char *path, unsigned long long dev, unsigned long long ino)
     struct stat st;
     return lstat(path, &st) == 0 && S_ISSOCK(st.st_mode) &&
            (unsigned long long)st.st_dev == dev && (unsigned long long)st.st_ino == ino;
+}
+
+/* Is someone accepting on path? Only "connection refused" proves nobody is;
+ * every other outcome counts as in use. */
+static int
+path_has_listener(const char *path)
+{
+    struct sockaddr_un sa;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return 1;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+    memcpy(sa.sun_path, path, strlen(path)); /* length checked by the caller */
+    int fl = fcntl(fd, F_GETFL, 0);
+    int refused = fl >= 0 && fcntl(fd, F_SETFL, fl | O_NONBLOCK) == 0 &&
+                  connect(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 &&
+                  errno == ECONNREFUSED;
+    close(fd);
+    return !refused;
 }
 
 static void
@@ -146,10 +170,24 @@ mgmt_listen_open(const mgmt_listen_opts_t *opts, char *errbuf, size_t errlen)
         goto fail;
     }
 
+    /* The lock file is ours only if it is empty or holds a record: anything
+     * else is somebody's file that happens to carry the name. */
+    unsigned long long rdev = 0, rino = 0;
+    int have_rec = read_record(lock_fd, &rdev, &rino) == 0;
+    if (fstat(lock_fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        (st.st_size > 0 && !have_rec)) {
+        SET_ERR("%s exists and is not an mqvpn lock file", lock_path);
+        goto fail_keep;
+    }
+
     if (lstat(path, &st) == 0) {
-        unsigned long long rdev, rino;
-        if (S_ISSOCK(st.st_mode) && read_record(lock_fd, &rdev, &rino) == 0 &&
-            path_is_ours(path, rdev, rino)) {
+        if (S_ISSOCK(st.st_mode) && have_rec && path_is_ours(path, rdev, rino)) {
+            /* We hold the lock, so a previous mqvpn is gone. A socket that still
+             * answers is another program's: its inode number was reused. */
+            if (path_has_listener(path)) {
+                SET_ERR("%s is in use by another program", path);
+                goto fail_keep;
+            }
             if (unlink(path) != 0) {
                 SET_ERR("cannot remove stale socket %s: %s", path, strerror(errno));
                 goto fail_keep;

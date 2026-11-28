@@ -27,6 +27,8 @@ RestrictSUIDSGID=yes
 ReadOnlyPaths=/etc/mqvpn
 ReadWritePaths=/dev/net/tun
 RuntimeDirectory=mqvpn
+# A client on the same host keeps its management socket there.
+RuntimeDirectoryPreserve=yes
 
 [Install]
 WantedBy=multi-user.target

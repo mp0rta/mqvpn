@@ -411,6 +411,7 @@ reorder_rule_begin(mqvpn_file_config_t *cfg, int lineno, const char *path)
 
 typedef enum {
     CFGK_STR,             /* char[]: snprintf copy, silent truncation          */
+    CFGK_STR_FIT,         /* char[]: a value that does not fit is invalid      */
     CFGK_BOOL,            /* int: INI true/false, JSON bool; bad = load error  */
     CFGK_INT,             /* int: int_ok() gate; optional fallback on invalid  */
     CFGK_U32,             /* uint32_t: inclusive max bound                     */
@@ -427,7 +428,7 @@ typedef struct {
     const char *json_key; /* NULL = INI-only key                           */
     cfg_key_type_t type;
     size_t offset;            /* offsetof(mqvpn_file_config_t, field)    */
-    size_t size;              /* CFGK_STR only: sizeof(field)            */
+    size_t size;              /* CFGK_STR / CFGK_STR_FIT: sizeof(field)  */
     unsigned long long max;   /* CFGK_U32/U16/U64: inclusive upper bound */
     int (*int_ok)(int v);     /* CFGK_INT: NULL = accept any parsed      */
     int has_invalid_fallback; /* CFGK_INT: write fallback when invalid   */
@@ -516,6 +517,13 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
         (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                      \
             sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
     }
+/* For values where a truncated string would mean something else (a file mode,
+ * a group name): too long = invalid, field left at its default. */
+#define CFG_STR_FIT(sec, ik, jk, field)                                    \
+    {                                                                      \
+        (sec), (ik), (jk), CFGK_STR_FIT, CFGK_OFF(field),                  \
+            sizeof(((mqvpn_file_config_t *)0)->field), 0, NULL, 0, 0, NULL \
+    }
 #define CFG_STR_POST(sec, ik, jk, field, post)                               \
     {                                                                        \
         (sec), (ik), (jk), CFGK_STR, CFGK_OFF(field),                        \
@@ -584,10 +592,10 @@ static const cfg_key_desc_t cfg_keys[] = {
     /* [ClientManagement] — client-side management IPC (off by default) */
     CFG_BOOL(SEC_CLIENT_MGMT, "Enabled", "client_mgmt_enabled", client_mgmt_enabled),
     CFG_STR(SEC_CLIENT_MGMT, "Endpoint", "client_mgmt_endpoint", client_mgmt_endpoint),
-    CFG_STR(SEC_CLIENT_MGMT, "SocketMode", "client_mgmt_socket_mode",
-            client_mgmt_socket_mode),
-    CFG_STR(SEC_CLIENT_MGMT, "SocketGroup", "client_mgmt_socket_group",
-            client_mgmt_socket_group),
+    CFG_STR_FIT(SEC_CLIENT_MGMT, "SocketMode", "client_mgmt_socket_mode",
+                client_mgmt_socket_mode),
+    CFG_STR_FIT(SEC_CLIENT_MGMT, "SocketGroup", "client_mgmt_socket_group",
+                client_mgmt_socket_group),
     /* [Multipath] */
     CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
     CFG_BOOL(SEC_MULTIPATH, "AllowClientScheduler", "allow_client_scheduler",
@@ -669,6 +677,10 @@ cfg_key_store(mqvpn_file_config_t *cfg, const cfg_key_desc_t *d, const char *v_s
      * int fields store via *(int *) since the offset names a real int member. */
     switch (d->type) {
     case CFGK_STR: snprintf(base, d->size, "%s", v_str); break;
+    case CFGK_STR_FIT:
+        if (strlen(v_str) >= d->size) return -1;
+        snprintf(base, d->size, "%s", v_str);
+        break;
     case CFGK_BOOL: *(int *)base = v_int; break;
     case CFGK_INT:
         /* forced-invalid sentinel from the walkers. Note: a genuine input of
@@ -728,6 +740,7 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
         int rc = 0;
         switch (d->type) {
         case CFGK_STR:
+        case CFGK_STR_FIT:
         case CFGK_HYBRID_TCP_MODE: rc = cfg_key_store(cfg, d, val, 0, 0); break;
         case CFGK_BOOL: {
             int bv = parse_bool(val);
@@ -806,6 +819,7 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, yyjson_val *root, yyjson_val *ro,
         int rc = 0;
         switch (d->type) {
         case CFGK_STR:
+        case CFGK_STR_FIT:
         case CFGK_HYBRID_TCP_MODE:
             if (json_copy_str(v, sbuf, sizeof(sbuf)) < 0)
                 rc = -1;

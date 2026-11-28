@@ -66,7 +66,7 @@ typedef struct mqvpn_file_config_s {
     int client_mgmt_enabled;
     char client_mgmt_endpoint[280];
     char client_mgmt_socket_mode[8];
-    char client_mgmt_socket_group[32];
+    char client_mgmt_socket_group[33]; /* 32-char group name + NUL */
 
     /* [Multipath] */
     char paths[MQVPN_CONFIG_MAX_PATHS][32];
