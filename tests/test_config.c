@@ -1407,7 +1407,7 @@ static void
 check_fixed_ip_users(const mqvpn_file_config_t *cfg, const char *what)
 {
     static const char *names[] = {"alice", "bob", "carol", "dave"};
-    static const char *keys[] = {"ka", "kb", "a:b", "a:b"};
+    static const char *keys[] = {"ka", "kb", "kc", "kd"};
     static const char *ips[] = {"10.0.0.10", "", "", "10.0.0.11"};
     ASSERT_EQ_INT(cfg->n_users, 4, what);
     for (int i = 0; i < 4 && i < cfg->n_users; i++) {
@@ -1423,8 +1423,8 @@ test_auth_users_fixed_ip_ini(void)
     const char *ini = "[Auth]\n"
                       "User = alice:ka:10.0.0.10\n"
                       "User = bob:kb\n"
-                      "User = carol:a:b\n"
-                      "User = dave:a:b:10.0.0.11\n";
+                      "User = carol:kc\n"
+                      "User = dave:kd:10.0.0.11\n";
     char *path = write_tmp(ini);
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
@@ -1438,8 +1438,8 @@ static void
 test_auth_users_fixed_ip_json(void)
 {
     const char *json = "{\"users\":[{\"name\":\"alice\",\"key\":\"ka\","
-                       "\"ip\":\"10.0.0.10\"},\"bob:kb\",\"carol:a:b\","
-                       "{\"name\":\"dave\",\"key\":\"a:b\",\"ip\":\"10.0.0.11\"}]}";
+                       "\"ip\":\"10.0.0.10\"},\"bob:kb\",\"carol:kc\","
+                       "{\"name\":\"dave\",\"key\":\"kd\",\"ip\":\"10.0.0.11\"}]}";
     mqvpn_file_config_t cfg;
     mqvpn_config_defaults(&cfg);
     int rc = mqvpn_config_load_json_filecfg(&cfg, json);
@@ -3048,28 +3048,34 @@ test_user_spec_split(void)
     } t[] = {
         {"alice:k", 0, "alice", "k", NULL},
         {"alice:k:10.0.0.10", 0, "alice", "k", "10.0.0.10"},
-        {"alice:a:b", 0, "alice", "a:b", NULL},
-        {"alice:a:b:10.0.0.10", 0, "alice", "a:b", "10.0.0.10"},
-        {"alice::10.0.0.10", 0, "alice", ":10.0.0.10", NULL},
         {"alice:10.0.0.10", 0, "alice", "10.0.0.10", NULL},
-        {"alice:k:1234", 0, "alice", "k:1234", NULL},
-        {"alice:k:v1.x", 0, "alice", "k:v1.x", NULL},
-        {"alice:10.0.0.256", 0, "alice", "10.0.0.256", NULL},
-        {"alice:k:10.0.0.256", -2, NULL, NULL, NULL},
-        {"alice:k:10.0.0", -2, NULL, NULL, NULL},
-        {"alice:k:10.0.0.1.2", -2, NULL, NULL, NULL},
-        {"alice:a:b:1.5", -2, NULL, NULL, NULL},
-        {"alice:k:10.0.0.1.", -2, NULL, NULL, NULL},
-        {"alice:k:10..0.1", -2, NULL, NULL, NULL},
-        /* Not only digits and dots: stays in the key, as before. */
-        {"alice:k:10.0.0.1/24", 0, "alice", "k:10.0.0.1/24", NULL},
-        {"alice:k:10,0,0,1", 0, "alice", "k:10,0,0,1", NULL},
-        {"alice:k:10.0.0.l", 0, "alice", "k:10.0.0.l", NULL},
+        {" alice : k : 10.0.0.10 ", 0, "alice", "k", "10.0.0.10"},
+        {"alice\t:\tk", 0, "alice", "k", NULL},
         /* Valid IPv4 that is no client address: split here, refused later. */
         {"alice:k:255.255.255.255", 0, "alice", "k", "255.255.255.255"},
+        /* Anything else after the second ':' is a mistyped address. */
+        {"alice:k:10.0.0.256", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0.1/24", -2, NULL, NULL, NULL},
+        {"alice:k:10,0,0,1", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0.l", -2, NULL, NULL, NULL},
+        {"alice:k:10.0. 0.1", -2, NULL, NULL, NULL},
+        {"alice:k:fd00::1", -2, NULL, NULL, NULL},
+        {"alice:k:", -2, NULL, NULL, NULL},
+        {"alice:k: ", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0.1.", -2, NULL, NULL, NULL},
+        {"alice:k:10..0.1", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0.1.2", -2, NULL, NULL, NULL},
+        {"alice:k:10.0.0.10:", -2, NULL, NULL, NULL},
+        {"alice:a:b", -2, NULL, NULL, NULL},
+        {"alice:a:b:10.0.0.10", -2, NULL, NULL, NULL},
         {"alice", -1, NULL, NULL, NULL},
         {":k", -1, NULL, NULL, NULL},
+        {" :k", -1, NULL, NULL, NULL},
+        {"", -1, NULL, NULL, NULL},
         {"alice:", -1, NULL, NULL, NULL},
+        {"alice: ", -1, NULL, NULL, NULL},
+        {"alice::10.0.0.10", -1, NULL, NULL, NULL},
     };
     for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
         char buf[64], *n = NULL, *k = NULL, *ip = NULL;
@@ -3098,6 +3104,43 @@ test_user_spec_mistyped_ip_fails_load(void)
         mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[\"alice:k:10.0.0.999\"]}"), -1,
         "JSON mistyped fixed IP");
     ASSERT_EQ_INT(cfg.n_users, 0, "JSON mistyped fixed IP adds no user");
+
+    /* The object form is how a key that contains ':' is written. */
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(
+                      &cfg, "{\"users\":[{\"name\":\"alice\",\"key\":\"a:b\"}]}"),
+                  0, "JSON object key with ':'");
+    ASSERT_EQ_STR(cfg.user_keys[0], "a:b", "JSON object key with ':' kept whole");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[\"alice:a:b\"]}"), -1,
+                  "JSON string key with ':'");
+
+    path = write_tmp("[Auth]\nUser = alice:a:b\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "INI key with ':'");
+    unlink(path);
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[\" bob : k : 10.0.0.9 \"]}"), 0,
+        "JSON string spaces around ':'");
+    ASSERT_EQ_STR(cfg.user_names[0], "bob", "JSON spaced name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k", "JSON spaced key");
+    ASSERT_EQ_STR(cfg.user_ips[0], "10.0.0.9", "JSON spaced fixed IP");
+
+    path = write_tmp("[Auth]\nUser = alice : k : 10.0.0.9/24\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), -1, "INI fixed IP with a prefix length");
+    unlink(path);
+
+    path = write_tmp("[Auth]\nUser = alice : k : 10.0.0.9\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, path), 0, "INI spaces around ':'");
+    unlink(path);
+    ASSERT_EQ_INT(cfg.n_users, 1, "INI spaces around ':' adds the user");
+    ASSERT_EQ_STR(cfg.user_names[0], "alice", "INI spaced name");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k", "INI spaced key");
+    ASSERT_EQ_STR(cfg.user_ips[0], "10.0.0.9", "INI spaced fixed IP");
 }
 
 /* Table-driven round-trip test over MQVPN_SCHED_LIST / MQVPN_CC_LIST

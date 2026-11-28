@@ -201,7 +201,7 @@ TEST(config_users_json_ip)
     mqvpn_config_t *cfg = mqvpn_config_new();
     ASSERT_EQ(mqvpn_config_load_json(
                   cfg, "{\"users\":[{\"name\":\"a\",\"key\":\"ka\",\"ip\":\"10.0.0.10\"},"
-                       "\"b:kb:10.0.0.11\",\"c:x:y\"]}"),
+                       "\"b:kb:10.0.0.11\",{\"name\":\"c\",\"key\":\"x:y\"}]}"),
               MQVPN_OK);
     ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "z", "kz", "10.0.0.10"),
               MQVPN_ERR_INVALID_ARG);
@@ -212,6 +212,8 @@ TEST(config_users_json_ip)
         "{\"users\":[{\"name\":\"a\",\"key\":\"ka\",\"ip\":5}]}",
         "{\"users\":[{\"name\":\"a\",\"key\":\"ka\",\"ip\":\"nope\"}]}",
         "{\"users\":[{\"name\":\"a\",\"key\":\"ka\",\"ip\":\"255.255.255.255junk\"}]}",
+        "{\"users\":[\"c:x:y\"]}",
+        "{\"users\":[\"c:kc:10.0.0.13/24\"]}",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
         ASSERT_NE(mqvpn_config_load_json(cfg, bad[i]), MQVPN_OK);

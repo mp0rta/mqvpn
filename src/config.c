@@ -233,7 +233,7 @@ add_user_entry(mqvpn_file_config_t *cfg, const char *name, const char *key,
     cfg->n_users++;
 }
 
-/* Returns -1 for a mistyped fixed address (a load error), 0 otherwise; other
+/* Returns -1 when the fixed address is not IPv4 (a load error), 0 otherwise; other
  * malformed entries are warned about and skipped. */
 static int
 parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const char *path)
@@ -243,8 +243,10 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
     char *name, *key, *ip;
     int rc = mqvpn_user_spec_split(pair, &name, &key, &ip);
     if (rc == -2) {
-        LOG_ERR("%s:%d: [Auth] User: the fixed address is not an IPv4 address", path,
-                lineno);
+        LOG_ERR("%s:%d: [Auth] User: the fixed address is not an IPv4 address (in "
+                "NAME:KEY:IP a key cannot contain ':'; use the JSON \"users\" object "
+                "form for such a key)",
+                path, lineno);
         return -1;
     }
     if (rc < 0) {
@@ -252,7 +254,7 @@ parse_user_pair(mqvpn_file_config_t *cfg, const char *val, int lineno, const cha
         return 0;
     }
 
-    add_user_entry(cfg, trim(name), trim(key), ip ? trim(ip) : NULL, lineno, path);
+    add_user_entry(cfg, name, key, ip, lineno, path);
     return 0;
 }
 
