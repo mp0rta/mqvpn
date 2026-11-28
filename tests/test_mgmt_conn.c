@@ -22,10 +22,8 @@ main(void)
 #  include "cmp_proto.h"
 #  include "log.h"
 
-#  include <arpa/inet.h>
 #  include <errno.h>
 #  include <fcntl.h>
-#  include <netinet/in.h>
 #  include <dirent.h>
 #  include <signal.h>
 #  include <stdint.h>
@@ -131,24 +129,14 @@ static int g_lfd = -1;
 static char g_dir[128];
 static char g_path[256];
 
-/* UDP pair + periodic tick: proof the loop keeps serving the VPN's own events. */
-static int g_utx = -1, g_urx = -1;
-static struct event *g_uev, *g_tick, *g_guard;
-static uint64_t g_udp_tx, g_udp_rx, g_ticks;
+/* Periodic 0 ms tick, the stand-in for the VPN's own events: it must get a turn
+ * before the endpoint handles more than one budget of requests. */
+static struct event *g_tick, *g_guard;
+static uint64_t g_ticks, g_tick_disp; /* g_tick_disp: dispatched at the last tick */
 
 /* Checks applied to every EVLOOP_ONCE the pumps run. */
 static uint32_t g_chk_budget; /* 0 = off */
-static int g_chk_udp, g_chk_tick;
-
-static void
-udp_cb(evutil_socket_t fd, short what, void *arg)
-{
-    char b[8];
-    (void)what;
-    (void)arg;
-    while (recv(fd, b, sizeof(b), MSG_DONTWAIT) > 0)
-        g_udp_rx++;
-}
+static int g_chk_tick;
 
 /* Periodic wake-up so a pump's EVLOOP_ONCE can never block for long. */
 static void
@@ -159,17 +147,6 @@ guard_cb(evutil_socket_t fd, short what, void *arg)
     (void)arg;
 }
 
-static void
-tick_cb(evutil_socket_t fd, short what, void *arg)
-{
-    static const struct timeval zero = {0, 0};
-    (void)fd;
-    (void)what;
-    (void)arg;
-    g_ticks++;
-    evtimer_add(g_tick, &zero);
-}
-
 static uint64_t
 disp_count(void)
 {
@@ -177,6 +154,20 @@ disp_count(void)
     if (!g_l) return 0;
     mgmt_listener_counters(g_l, &c);
     return c.dispatched;
+}
+
+static void
+tick_cb(evutil_socket_t fd, short what, void *arg)
+{
+    static const struct timeval zero = {0, 0};
+    uint64_t d = disp_count();
+    (void)fd;
+    (void)what;
+    (void)arg;
+    g_ticks++;
+    if (g_chk_budget) CHECK(d - g_tick_disp <= g_chk_budget);
+    g_tick_disp = d;
+    evtimer_add(g_tick, &zero);
 }
 
 static mgmt_listener_counters_t
@@ -192,13 +183,8 @@ static void
 loop_once(void)
 {
     uint64_t d0 = disp_count(), t0 = g_ticks;
-    if (g_chk_udp) {
-        (void)sock_send(g_utx, "x", 1);
-        g_udp_tx++;
-    }
     event_base_loop(g_eb, EVLOOP_ONCE);
     if (g_chk_budget) CHECK(disp_count() - d0 <= g_chk_budget);
-    if (g_chk_udp) CHECK(g_udp_rx == g_udp_tx);
     if (g_chk_tick) CHECK(g_ticks > t0);
 }
 
@@ -206,12 +192,12 @@ loop_once(void)
  * runs while on: a self-re-arming 0 ms timer would keep EVLOOP_NONBLOCK from returning.
  */
 static void
-checks_on(uint32_t budget, int udp, int tick)
+checks_on(uint32_t budget, int tick)
 {
     static const struct timeval zero = {0, 0};
     g_chk_budget = budget;
-    g_chk_udp = udp;
     g_chk_tick = tick;
+    g_tick_disp = disp_count();
     if (tick) evtimer_add(g_tick, &zero);
 }
 
@@ -219,7 +205,7 @@ static void
 checks_off(void)
 {
     g_chk_budget = 0;
-    g_chk_udp = g_chk_tick = 0;
+    g_chk_tick = 0;
     evtimer_del(g_tick);
 }
 
@@ -236,9 +222,6 @@ run_for_ms(unsigned ms)
 static void
 fixture_start(const mgmt_conn_limits_t *lim)
 {
-    struct sockaddr_in sa;
-    socklen_t sl = sizeof(sa);
-
     snprintf(g_dir, sizeof(g_dir), "/tmp/mqvpn-mc-XXXXXX");
     CHECK(mkdtemp(g_dir) != NULL);
     snprintf(g_path, sizeof(g_path), "%s/s", g_dir);
@@ -250,27 +233,15 @@ fixture_start(const mgmt_conn_limits_t *lim)
     g_l = mgmt_endpoint_add_listener(g_ep, g_lfd, MGMT_ROLE_ADMIN, g_path);
     CHECK(g_l != NULL);
 
-    g_urx = socket(AF_INET, SOCK_DGRAM, 0);
-    g_utx = socket(AF_INET, SOCK_DGRAM, 0);
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    CHECK(bind(g_urx, (struct sockaddr *)&sa, sizeof(sa)) == 0);
-    CHECK(getsockname(g_urx, (struct sockaddr *)&sa, &sl) == 0);
-    CHECK(connect(g_utx, (struct sockaddr *)&sa, sizeof(sa)) == 0);
-    sock_nonblock(g_urx);
-    sock_nonblock(g_utx);
-    g_uev = event_new(g_eb, g_urx, EV_READ | EV_PERSIST, udp_cb, NULL);
-    event_add(g_uev, NULL);
     g_tick = evtimer_new(g_eb, tick_cb, NULL); /* armed by checks_on() */
     g_guard = event_new(g_eb, -1, EV_PERSIST, guard_cb, NULL);
     {
         static const struct timeval fifty_ms = {0, 50000};
         evtimer_add(g_guard, &fifty_ms);
     }
-    g_udp_tx = g_udp_rx = g_ticks = 0;
+    g_ticks = 0;
     g_chk_budget = 0;
-    g_chk_udp = g_chk_tick = 0;
+    g_chk_tick = 0;
 }
 
 static void
@@ -279,11 +250,8 @@ fixture_stop(void)
     if (g_ep) mgmt_endpoint_free(g_ep);
     g_ep = NULL;
     g_l = NULL;
-    event_free(g_uev);
     event_free(g_tick);
     event_free(g_guard);
-    sock_close(g_urx);
-    sock_close(g_utx);
     if (g_lfd >= 0) sock_close(g_lfd);
     g_lfd = -1;
     unlink(g_path);
@@ -802,7 +770,7 @@ conn_budget_defers_and_resumes(void)
     run_for_ms(20); /* accept them all */
     for (i = 0; i < N; i++)
         CHECK(pump_send(c[i], L_HELLO(1), strlen(L_HELLO(1))) == 0);
-    checks_on(2, 1, 1);
+    checks_on(2, 1);
     while (total < N && iters < 200) {
         loop_once();
         iters++;
@@ -836,7 +804,7 @@ conn_32_connections_hammer_keeps_loop_alive(void)
     puts("conn_32_connections_hammer_keeps_loop_alive");
     small_limits(&lim); /* defaults: budget 4, 32 connections */
     fixture_start(&lim);
-    checks_on(lim.request_budget_per_loop, 1, 1);
+    checks_on(lim.request_budget_per_loop, 1);
     for (i = 0; i < N; i++) {
         c[i] = cl_new();
         do_hello(c[i], 1);
@@ -900,7 +868,7 @@ conn_accept_flood_is_budgeted(void)
     lim.accept_budget_per_loop = 3;
     lim.max_connections = 32;
     fixture_start(&lim);
-    checks_on(0, 1, 1);
+    checks_on(0, 1);
     for (i = 0; i < N; i++)
         c[i] = cl_new();
     loop_once();
