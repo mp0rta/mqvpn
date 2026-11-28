@@ -284,6 +284,10 @@ struct mqvpn_client_s {
     int n_paths;
     int64_t next_path_handle;
     int multipath_ready; /* 1 after cb_ready_to_create_path */
+    /* Bit i: mqvpn_client_reactivate_path() asked for paths[i] and xquic had
+     * no path ID for it; cb_ready_to_create_path creates the path once xquic
+     * has one. */
+    uint32_t wait_path_id_mask;
     /* 1 from a scheduler request until TUNNEL_READY: secondary paths stay PENDING so
      * the server sees only path 0 when it swaps its scheduler. */
     int hold_extra_paths;
@@ -339,6 +343,7 @@ struct mqvpn_client_s {
     int owner_thread_set;
 #endif
 };
+_Static_assert(MQVPN_MAX_PATHS <= 32, "wait_path_id_mask has one bit per path slot");
 
 /* ─── State transition table (M0-5) ─── */
 
@@ -1056,6 +1061,7 @@ static void
 client_reset_paths_for_reconnect(mqvpn_client_t *c)
 {
     c->multipath_ready = 0;
+    c->wait_path_id_mask = 0;
     c->hold_extra_paths = 0;
     for (int i = 0; i < c->n_paths; i++) {
         client_reset_path_runtime(c, &c->paths[i]);
@@ -2619,12 +2625,25 @@ activate_classify(xqc_int_t ret)
 /* PR4 — Call xqc_conn_create_path() and classify per spec §6.6.
  * On OK, *out_path_id receives the new xqc-side path_id; on fail it is 0.
  * The caller passes the classification + path_id into path_on_event()'s
- * ctx (ACTIVATE_REQUESTED / RETRY_TIMER / MANUAL_REACTIVATE). */
+ * ctx (RETRY_TIMER / MANUAL_REACTIVATE).
+ *
+ * requested: the platform asked for the path (mqvpn_client_reactivate_path).
+ * A refusal for want of a path ID then marks the slot in wait_path_id_mask,
+ * and reactivate_waiting_paths carries the request out when xquic has one.
+ * The retry timer (requested = 0) marks nothing: its refused attempt is a
+ * failed retry like any other. Any attempt xquic does not refuse that way
+ * ends the wait. */
 static activate_result_t
-activate_via_xquic_classify(mqvpn_client_t *c, const path_entry_t *p,
+activate_via_xquic_classify(mqvpn_client_t *c, const path_entry_t *p, int requested,
                             uint64_t *out_path_id)
 {
-    return activate_classify(create_xquic_path(c, p, out_path_id));
+    xqc_int_t ret = create_xquic_path(c, p, out_path_id);
+    uint32_t bit = 1u << (p - c->paths);
+    if (ret != -XQC_EMP_NO_AVAIL_PATH_ID)
+        c->wait_path_id_mask &= ~bit;
+    else if (requested)
+        c->wait_path_id_mask |= bit;
+    return activate_classify(ret);
 }
 
 /* Create an xquic path for a secondary path entry. Thin caller — all state
@@ -2676,19 +2695,54 @@ client_activate_path(mqvpn_client_t *c, path_entry_t *p, int idx)
 /* Activate every path currently in PATH_LC_PENDING, in slot order, until
  * xquic has no path ID for one (see client_activate_path): it would refuse
  * the paths after it alike, and they all wait for the next
- * ready_to_create_path notification.
+ * ready_to_create_path notification. Returns -1 then, 0 otherwise.
  *
  * PR3 translator: the legacy predicate (xquic_path_live=0 && transport_attached=1)
  * is now expressed by the PENDING lifecycle state. CREATE_WAIT slots (also
  * have xquic_path_live=0) are correctly skipped — they wait for their retry
  * timer in tick(), not for re-activation here. */
-static void
+static int
 activate_pending_paths(mqvpn_client_t *c)
 {
     for (int i = 0; i < c->n_paths; i++) {
         path_entry_t *p = &c->paths[i];
         if (p->state != PATH_LC_PENDING) continue;
-        if (client_activate_path(c, p, i) < 0) break;
+        if (client_activate_path(c, p, i) < 0) return -1;
+    }
+    return 0;
+}
+
+static int reactivate_slot_eligible(const path_entry_t *p);
+
+/* Carry out each reactivation in wait_path_id_mask, in slot order, until
+ * xquic has no path ID for one again: the same attempt and event as in
+ * mqvpn_client_reactivate_path(). The bit of a slot that call would refuse
+ * by now is dropped. */
+static void
+reactivate_waiting_paths(mqvpn_client_t *c)
+{
+    for (int i = 0; i < c->n_paths; i++) {
+        path_entry_t *p = &c->paths[i];
+        uint32_t bit = 1u << i;
+        if (!(c->wait_path_id_mask & bit)) continue;
+        if (reactivate_slot_eligible(p) != MQVPN_OK) {
+            c->wait_path_id_mask &= ~bit;
+            continue;
+        }
+        uint64_t new_id = 0;
+        activate_result_t r = activate_via_xquic_classify(c, p, 1, &new_id);
+        if (c->wait_path_id_mask & bit) return; /* no path ID again */
+        LOG_I(c, "path[%d] path ID available, reactivating: result=%s id=%llu", i,
+              r == ACTIVATE_OK               ? "OK"
+              : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"
+                                             : "TRANSIENT",
+              (unsigned long long)new_id);
+        path_event_ctx_t ctx = {
+            .result = r,
+            .new_xqc_path_id = new_id,
+            .now_us = client_now_us(c),
+        };
+        path_on_event(c, p, PATH_EVENT_MANUAL_REACTIVATE, &ctx);
     }
 }
 
@@ -2714,7 +2768,8 @@ cb_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data)
     c->multipath_ready = 1;
     if (!c->config.multipath || c->hold_extra_paths) return;
 
-    activate_pending_paths(c);
+    if (activate_pending_paths(c) < 0) return; /* none left for the waiting paths */
+    reactivate_waiting_paths(c);
 }
 
 MQVPN_INTERNAL
@@ -3627,6 +3682,7 @@ mqvpn_client_add_path(mqvpn_client_t *c, const mqvpn_path_desc_t *desc,
      * transitions cleanly to PENDING; the attached/released flags are
      * applied inside path_on_add. */
     path_entry_init(p);
+    c->wait_path_id_mask &= ~(1u << idx);
     p->handle = c->next_path_handle++;
     client_copy_path_ops(&p->ops, ops);
     p->transport_ctx = transport_ctx;
@@ -3801,7 +3857,7 @@ mqvpn_client_reactivate_path(mqvpn_client_t *c, mqvpn_path_handle_t handle)
           path_lifecycle_name(p->state));
 
     uint64_t new_id = 0;
-    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
+    activate_result_t r = activate_via_xquic_classify(c, p, 1, &new_id);
     path_event_ctx_t ctx = {
         .result = r,
         .new_xqc_path_id = new_id,
@@ -4335,7 +4391,7 @@ tick_drive_retry_timer(mqvpn_client_t *c, path_entry_t *p, int idx, uint64_t now
     if (p->recreate_after_us == 0 || now < p->recreate_after_us) return;
 
     uint64_t new_id = 0;
-    activate_result_t r = activate_via_xquic_classify(c, p, &new_id);
+    activate_result_t r = activate_via_xquic_classify(c, p, 0, &new_id);
     LOG_I(c, "path[%d] retry: result=%s retries=%d/%d", idx,
           r == ACTIVATE_OK               ? "OK"
           : r == ACTIVATE_PERMANENT_FAIL ? "PERMANENT"

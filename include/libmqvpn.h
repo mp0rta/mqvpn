@@ -1052,7 +1052,9 @@ MQVPN_API int mqvpn_client_on_platform_path_released(mqvpn_client_t *client,
  * recovery timer is cancelled. Retry counter resets after 30s stability.
  *
  * Returns MQVPN_OK, MQVPN_ERR_INVALID_ARG, MQVPN_ERR_INVALID_STATE, or
- * MQVPN_ERR_ENGINE.
+ * MQVPN_ERR_ENGINE. MQVPN_ERR_ENGINE means xquic refused the new path; when
+ * it refused only because it has no path ID for it yet, the library creates
+ * the path once xquic has one, without a second call.
  * Thread safety: must be called from the tick thread (same as all other APIs).
  */
 MQVPN_API int mqvpn_client_reactivate_path(mqvpn_client_t *client,
